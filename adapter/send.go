@@ -328,7 +328,10 @@ func (s *Session) SendMedia(requestID, convID, path, caption string) {
 	infos := []*gmproto.MessageInfo{{
 		Data: &gmproto.MessageInfo_MediaContent{MediaContent: uploaded},
 	}}
-	if caption != "" && caption != name {
+	// Upstream documents that RCS does not support captions reliably;
+	// adding a second text part can leave the entire media send stuck.
+	// Preserve captions only on the legacy path where libgm supports them.
+	if caption != "" && caption != name && meta.convType != gmproto.ConversationType_RCS {
 		infos = append(infos, &gmproto.MessageInfo{
 			Data: &gmproto.MessageInfo_MessageContent{
 				MessageContent: &gmproto.MessageContent{Content: caption},
