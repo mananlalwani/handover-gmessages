@@ -326,12 +326,15 @@ func (s *Session) handleMessage(msg *gmproto.Message, isOld bool) {
 	}
 	s.emit(Event{Type: "messages", Account: s.account, Conversation: convID,
 		Messages: []Message{*mapped}})
+	// Remote echoes are authoritative even when the relay's sender field
+	// uses an alias not present in selfIDs. Correlate pending sends before
+	// applying the self-sender heuristic so late send statuses are not lost.
+	s.checkPending(msg)
 	if s.isSelfSender(convID, msg) {
 		if token, ok := mapStatus(status); ok {
 			s.emit(Event{Type: "status", Account: s.account,
 				Conversation: convID, Message: msg.GetMessageID(), Status: token})
 		}
-		s.checkPending(msg)
 	}
 }
 
