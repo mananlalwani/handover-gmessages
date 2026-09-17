@@ -44,6 +44,11 @@ func (s *Session) failure(requestID, msg string) {
 	s.result(requestID, false, msg)
 }
 
+func (s *Session) relayFailure(convID, txn, reason string) {
+	s.emit(Event{Type: "status", Account: s.account, Conversation: convID,
+		Message: txn, Status: "failed:" + reason})
+}
+
 // Login starts Gaia pairing from a user-supplied credential bundle. The
 // bundle is JSON: {"cookies": {"SID": "...", ...}}. Values never enter
 // logs; only missing key names surface.
@@ -258,18 +263,23 @@ func (s *Session) SendText(requestID, convID, text string) {
 		s.failure(requestID, "not connected")
 		return
 	}
-	ctx, cancel := slowCtx()
-	defer cancel()
-	if _, err := client.SendMessage(ctx, req); err != nil {
-		s.failure(requestID, classifySendError(err))
-		return
-	}
+	// Acceptance means the helper queued the relay operation. The phone's
+	// eventual response is reported separately as a lifecycle status.
 	s.mu.Lock()
 	s.pending[txn] = pendingSend{requestID: requestID, convID: convID}
 	s.mu.Unlock()
 	s.result(requestID, true, "")
 	s.emit(Event{Type: "status", Account: s.account,
 		Conversation: convID, Message: txn, Status: "accepted"})
+	ctx, cancel := slowCtx()
+	defer cancel()
+	if _, err := client.SendMessage(ctx, req); err != nil {
+		s.mu.Lock()
+		delete(s.pending, txn)
+		s.mu.Unlock()
+		s.relayFailure(convID, txn, classifySendError(err))
+		return
+	}
 }
 
 func metaSIM(s *Session, meta *convMeta) *gmproto.SIMPayload {
@@ -337,16 +347,19 @@ func (s *Session) SendMedia(requestID, convID, path, caption string) {
 	}
 	ctx, cancel := slowCtx()
 	defer cancel()
-	if _, err := client.SendMessage(ctx, req); err != nil {
-		s.failure(requestID, classifySendError(err))
-		return
-	}
 	s.mu.Lock()
 	s.pending[txn] = pendingSend{requestID: requestID, convID: convID}
 	s.mu.Unlock()
 	s.result(requestID, true, "")
 	s.emit(Event{Type: "status", Account: s.account,
 		Conversation: convID, Message: txn, Status: "accepted"})
+	if _, err := client.SendMessage(ctx, req); err != nil {
+		s.mu.Lock()
+		delete(s.pending, txn)
+		s.mu.Unlock()
+		s.relayFailure(convID, txn, classifySendError(err))
+		return
+	}
 }
 
 // readStagedUpload reads a daemon-staged file with a hard cap. The path
