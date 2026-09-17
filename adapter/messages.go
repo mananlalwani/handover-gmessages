@@ -10,13 +10,11 @@ import (
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
 
-// mapMessage converts one relay message into wire form. It returns
-// (nil, removedID) when the relay marks the message deleted, and
-// (nil, "") when the record carries no user content (tombstones,
-// undecryptable markers without text). Media parts are downloaded and
-// staged; parts that cannot be retrieved keep their metadata with no
-// staged path rather than dropping the whole message.
-func (s *Session) mapMessage(convID string, msg *gmproto.Message) (*Message, string) {
+// mapMessage converts one relay message into wire form. When download
+// is false (bulk sync windows), media parts keep metadata with no
+// staged path: bytes resolve on explicit history fetches and live
+// deliveries instead of stalling the sync on hundreds of downloads.
+func (s *Session) mapMessage(convID string, msg *gmproto.Message, download bool) (*Message, string) {
 	if msg == nil || msg.GetMessageID() == "" {
 		return nil, ""
 	}
@@ -50,7 +48,7 @@ func (s *Session) mapMessage(convID string, msg *gmproto.Message) (*Message, str
 		out.Text = joined
 	}
 	for i, part := range media {
-		attachment := s.stageMedia(convID, msg, part, i)
+		attachment := s.stageMedia(convID, msg, part, i, download)
 		out.Attachments = append(out.Attachments, attachment)
 	}
 	if reply := msg.GetReplyMessage(); reply != nil && reply.GetMessageID() != "" {
@@ -105,9 +103,10 @@ func senderKeyOf(msg *gmproto.Message) string {
 }
 
 // stageMedia downloads one media part into the staging directory and
-// returns its wire record. Bytes are bounded; failures keep metadata
-// with no path.
-func (s *Session) stageMedia(convID string, msg *gmproto.Message, part *gmproto.MediaContent, index int) Attachment {
+// stageMedia records one media part. With download=true the bytes are
+// fetched into staging; otherwise metadata only (bulk sync fast path).
+// Bytes are bounded; failures keep metadata with no path.
+func (s *Session) stageMedia(convID string, msg *gmproto.Message, part *gmproto.MediaContent, index int, download bool) Attachment {
 	actionID := ""
 	if len(msg.GetMessageInfo()) > index {
 		actionID = msg.GetMessageInfo()[index].GetActionMessageID()
@@ -125,6 +124,9 @@ func (s *Session) stageMedia(convID string, msg *gmproto.Message, part *gmproto.
 		size := int64(size)
 		sizeU := uint64(size)
 		attachment.SizeBytes = &sizeU
+	}
+	if !download {
+		return attachment
 	}
 	path, err := s.downloadPart(msg.GetMessageID(), actionID, part)
 	if err != nil {

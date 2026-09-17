@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
@@ -71,7 +72,7 @@ func (s *Session) FetchHistory(convID string, limit uint32, cursor *string) {
 	if limit < 1 || limit > 100 {
 		limit = messageWindow
 	}
-	s.emitWindow(convID, limit, cursor, false)
+	s.emitWindow(convID, limit, cursor, false, true)
 }
 
 // SendResult reports acceptance for commands rejected before any relay
@@ -104,27 +105,65 @@ func (s *Session) fullSync(reason string) {
 		return
 	}
 	var threads []Conversation
-	for _, conv := range resp.GetConversations() {
-		full, err := s.getConversation(conv.GetConversationID())
-		if err != nil {
-			s.log.Warn().Str("conversation", conv.GetConversationID()).Msg("skipping thread")
-			continue
+	type threadResult struct {
+		index  int
+		thread Conversation
+		unread bool
+		ok     bool
+	}
+	results := make([]threadResult, len(resp.GetConversations()))
+	var wg sync.WaitGroup
+	lanes := make(chan struct{}, 8)
+	for i, conv := range resp.GetConversations() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lanes <- struct{}{}
+			defer func() { <-lanes }()
+			full, err := s.getConversation(conv.GetConversationID())
+			if err != nil {
+				s.log.Warn().Str("conversation", conv.GetConversationID()).Msg("skipping thread")
+				return
+			}
+			mapped, meta, err := s.mapConversation(full)
+			if err != nil {
+				s.log.Warn().Err(err).Msg("skipping thread")
+				return
+			}
+			s.mu.Lock()
+			s.metas[full.GetConversationID()] = meta
+			s.mu.Unlock()
+			results[i] = threadResult{index: i, thread: mapped, unread: full.GetUnread(), ok: true}
+		}()
+	}
+	wg.Wait()
+	for _, result := range results {
+		if result.ok {
+			threads = append(threads, result.thread)
 		}
-		mapped, meta, err := s.mapConversation(full)
-		if err != nil {
-			s.log.Warn().Err(err).Msg("skipping thread")
-			continue
-		}
-		s.mu.Lock()
-		s.metas[full.GetConversationID()] = meta
-		s.mu.Unlock()
-		threads = append(threads, mapped)
 	}
 	s.emitConversations(threads)
+	var wwg sync.WaitGroup
+	wlanes := make(chan struct{}, 8)
 	for _, thread := range threads {
-		s.emitWindow(thread.LocalID, messageWindow, nil, true)
+		wwg.Add(1)
+		go func() {
+			defer wwg.Done()
+			wlanes <- struct{}{}
+			defer func() { <-wlanes }()
+			s.emitWindow(thread.LocalID, messageWindow, nil, true, false)
+		}()
+	}
+	wwg.Wait()
+	unreads := map[string]bool{}
+	for _, result := range results {
+		if result.ok {
+			unreads[result.thread.LocalID] = result.unread
+		}
+	}
+	for _, thread := range threads {
 		s.emit(Event{Type: "read", Account: s.account, Conversation: thread.LocalID,
-			Unread: s.threadUnread(thread.LocalID)})
+			Unread: unreads[thread.LocalID]})
 	}
 	if err := s.store.SaveAuth(s.account, s.auth); err != nil {
 		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
@@ -219,7 +258,7 @@ func mintCursor(id string, ts int64) string {
 
 // emitWindow pages one thread window and emits it. full=false pages merge
 // downstream; the daemon reconciles only full sync windows.
-func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full bool) {
+func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, download bool) {
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
@@ -246,7 +285,7 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full b
 	}
 	var out []Message
 	for _, msg := range resp.GetMessages() {
-		mapped, removed := s.mapMessage(convID, msg)
+		mapped, removed := s.mapMessage(convID, msg, download)
 		if removed != "" {
 			s.emit(Event{Type: "message_removed", Account: s.account,
 				Conversation: convID, Message: removed})
@@ -283,7 +322,7 @@ func (s *Session) handleMessage(msg *gmproto.Message, isOld bool) {
 		}
 		return
 	}
-	mapped, removed := s.mapMessage(convID, msg)
+	mapped, removed := s.mapMessage(convID, msg, true)
 	if removed != "" {
 		s.emit(Event{Type: "message_removed", Account: s.account,
 			Conversation: convID, Message: removed})

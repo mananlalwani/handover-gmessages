@@ -31,7 +31,13 @@ func main() {
 	if os.Getenv("HANDOVER_ADAPTER_DEBUG") != "" {
 		level = zerolog.DebugLevel
 	}
-	log := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).
+	var writer = zerolog.ConsoleWriter{Out: os.Stderr}
+	if path := os.Getenv("HANDOVER_ADAPTER_LOG"); path != "" {
+		if file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			writer.Out = file
+		}
+	}
+	log := zerolog.New(writer).
 		Level(level).
 		With().Str("component", "adapter").Logger()
 

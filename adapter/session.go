@@ -96,10 +96,14 @@ func NewSession(account string, store *Store, log zerolog.Logger, emit func(Even
 }
 
 func (s *Session) buildClient(auth *libgm.AuthData) {
+	// The relay library is chatty at debug (base64 settings dumps that
+	// decode to phone numbers); it stays at warn unconditionally while
+	// the adapter's own logger follows HANDOVER_ADAPTER_DEBUG.
+	relayLog := s.log.With().Str("component", "libgm").Logger().Level(zerolog.WarnLevel)
 	s.client = libgm.NewClient(
 		auth,
 		nil,
-		s.log.With().Str("component", "libgm").Logger(),
+		relayLog,
 		exhttp.ClientSettings{},
 	)
 	s.client.SetEventHandler(func(evt any) {

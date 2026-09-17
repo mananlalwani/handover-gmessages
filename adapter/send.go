@@ -615,7 +615,7 @@ func (s *Session) Open(requestID string, addresses []string) {
 		s.mu.Unlock()
 		s.emit(Event{Type: "conversations", Account: s.account,
 			Conversations: []Conversation{mapped}})
-		s.emitWindow(conv.GetConversationID(), messageWindow, nil, false)
+		s.emitWindow(conv.GetConversationID(), messageWindow, nil, false, true)
 	}
 }
 
