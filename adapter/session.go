@@ -211,16 +211,6 @@ func (s *Session) connectOnce(ctx context.Context) error {
 	if err := client.Connect(timeout); err != nil {
 		return err
 	}
-	// libgm starts long-polling asynchronously.  Its postConnect callback
-	// also sends this request, but the callback runs after Connect returns;
-	// doing it here prevents our first sync/send/history RPC from racing the
-	// relay while the phone session is still inactive.
-	activeCtx, activeCancel := context.WithTimeout(ctx, rpcTimeout)
-	if err := client.SetActiveSession(activeCtx); err != nil {
-		activeCancel()
-		return fmt.Errorf("activating relay session: %w", err)
-	}
-	activeCancel()
 	s.mu.Lock()
 	s.connected = true
 	s.authenticated = true
@@ -230,7 +220,19 @@ func (s *Session) connectOnce(ctx context.Context) error {
 	if err := s.store.SaveAuth(s.account, s.auth); err != nil {
 		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
 	}
-	s.fullSync("connect")
+	// libgm's postConnect callback activates the phone session asynchronously
+	// after Connect returns. Start our catch-up after that small hand-off;
+	// running ListConversations immediately races the callback and can leave
+	// the first sync waiting for a response that the phone never produces.
+	go func() {
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			s.fullSync("connect")
+		case <-s.closed:
+		}
+	}()
 	return nil
 }
 
