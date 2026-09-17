@@ -181,23 +181,27 @@ func (h *hub) dispatch(cmd adapter.Command) {
 		if cmd.Cursor != "" {
 			cursor = &cmd.Cursor
 		}
-		h.session(cmd.Account).FetchHistory(cmd.Conversation, limit, cursor)
+		account, conversation := cmd.Account, cmd.Conversation
+		go h.session(account).FetchHistory(conversation, limit, cursor)
 	case "send_text":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" || cmd.RequestID == "" {
 			return
 		}
-		h.session(cmd.Account).SendText(cmd.RequestID, cmd.Conversation, cmd.Text)
+		account, conversation, text, requestID := cmd.Account, cmd.Conversation, cmd.Text, cmd.RequestID
+		go h.session(account).SendText(requestID, conversation, text)
 	case "send_media":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" || cmd.RequestID == "" || cmd.Path == "" {
 			h.session(cmd.Account).SendResult(cmd.RequestID, false, "unreadable file")
 			return
 		}
-		h.session(cmd.Account).SendMedia(cmd.RequestID, cmd.Conversation, cmd.Path, cmd.Caption)
+		account, conversation, path, caption, requestID := cmd.Account, cmd.Conversation, cmd.Path, cmd.Caption, cmd.RequestID
+		go h.session(account).SendMedia(requestID, conversation, path, caption)
 	case "react":
 		if !validAccount(cmd.Account) || cmd.RequestID == "" {
 			return
 		}
-		h.session(cmd.Account).React(cmd.RequestID, cmd.Conversation, cmd.Message, cmd.Emoji, cmd.Add)
+		account, conversation, message, emoji, add, requestID := cmd.Account, cmd.Conversation, cmd.Message, cmd.Emoji, cmd.Add, cmd.RequestID
+		go h.session(account).React(requestID, conversation, message, emoji, add)
 	case "mark_read":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" {
 			return
@@ -212,12 +216,14 @@ func (h *hub) dispatch(cmd adapter.Command) {
 		if !validAccount(cmd.Account) || cmd.RequestID == "" {
 			return
 		}
-		h.session(cmd.Account).DeleteMessage(cmd.RequestID, cmd.Message)
+		account, message, requestID := cmd.Account, cmd.Message, cmd.RequestID
+		go h.session(account).DeleteMessage(requestID, message)
 	case "open_conversation":
 		if !validAccount(cmd.Account) || cmd.RequestID == "" {
 			return
 		}
-		h.session(cmd.Account).Open(cmd.RequestID, cmd.Addresses)
+		account, addresses, requestID := cmd.Account, cmd.Addresses, cmd.RequestID
+		go h.session(account).Open(requestID, addresses)
 	default:
 		h.write(adapter.Event{Type: "error", Message: "unknown command"})
 	}

@@ -26,6 +26,10 @@ func timeoutCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), rpcTimeout)
 }
 
+func slowCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), slowTimeout)
+}
+
 // result reports acceptance for a request id. ok=true means the relay
 // took the request, never that it was delivered or displayed.
 func (s *Session) result(requestID string, ok bool, errMsg string) {
@@ -239,7 +243,7 @@ func (s *Session) SendText(requestID, convID, text string) {
 		s.failure(requestID, "not connected")
 		return
 	}
-	ctx, cancel := timeoutCtx()
+	ctx, cancel := slowCtx()
 	defer cancel()
 	if _, err := client.SendMessage(ctx, req); err != nil {
 		s.failure(requestID, classifySendError(err))
@@ -316,7 +320,7 @@ func (s *Session) SendMedia(requestID, convID, path, caption string) {
 		ForceRCS: meta.convType == gmproto.ConversationType_RCS &&
 			meta.sendMode == gmproto.ConversationSendMode_SEND_MODE_AUTO,
 	}
-	ctx, cancel := timeoutCtx()
+	ctx, cancel := slowCtx()
 	defer cancel()
 	if _, err := client.SendMessage(ctx, req); err != nil {
 		s.failure(requestID, classifySendError(err))
@@ -580,9 +584,11 @@ func (s *Session) Open(requestID string, addresses []string) {
 			Number2:       address,
 		})
 	}
-	ctx, cancel := timeoutCtx()
+	ctx, cancel := slowCtx()
 	defer cancel()
+	start := time.Now()
 	resp, err := client.GetOrCreateConversation(ctx, req)
+	s.log.Info().Str("stage", "open-response").Dur("elapsed", time.Since(start)).Msg("relay answered")
 	if err != nil {
 		s.failure(requestID, "open failed")
 		return

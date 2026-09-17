@@ -85,6 +85,7 @@ func mapConversation(conv *gmproto.Conversation, selfIDs map[string]bool) (Conve
 	}
 	participants := make([]Participant, 0, len(conv.GetParticipants()))
 	seen := map[string]bool{}
+	selfKept := false
 	for _, p := range conv.GetParticipants() {
 		mapped := mapParticipant(p, selfIDs)
 		if mapped.LocalID == "" {
@@ -93,14 +94,28 @@ func mapConversation(conv *gmproto.Conversation, selfIDs map[string]bool) (Conve
 		if seen[mapped.LocalID] {
 			continue
 		}
+		// The relay reports each of the user's own identities (multi-SIM,
+		// Fi device switching) as separate participants. Extra self
+		// entries merge into the first: they are one local user, and
+		// keeping them would mislabel 1:1 threads as multi-party.
+		if mapped.IsSelf {
+			if selfKept {
+				continue
+			}
+			selfKept = true
+		}
 		seen[mapped.LocalID] = true
 		participants = append(participants, mapped)
 	}
 	if len(participants) == 0 {
 		return Conversation{}, nil, fmt.Errorf("conversation %s has no participants", conv.GetConversationID())
 	}
-	if kind == "direct" && len(participants) > 2 {
-		return Conversation{}, nil, fmt.Errorf("direct conversation %s has %d participants", conv.GetConversationID(), len(participants))
+	// A thread with more than two parties is a group conversation even
+	// when the relay leaves its group flag unset (observed on older
+	// multi-party threads). Participant count is relay-attested data,
+	// so this promotes by evidence, not by guess.
+	if len(participants) > 2 {
+		kind = "group"
 	}
 	caps := smsCaps
 	if conv.GetType() == gmproto.ConversationType_RCS {

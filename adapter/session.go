@@ -15,9 +15,12 @@ import (
 	exhttp "go.mau.fi/util/exhttp"
 )
 
-// rpcTimeout bounds relay RPCs. The phone must answer through Google
-// servers; longer waits surface as phone-not-responding, never hangs.
+// rpcTimeout bounds routine relay RPCs. Slow phone operations (sends,
+// opens) use slowTimeout: the daemon reports its own 30s wait first,
+// but late relay answers still land as state events rather than being
+// abandoned.
 const rpcTimeout = 60 * time.Second
+const slowTimeout = 3 * time.Minute
 
 // syncPage bounds conversation listing and per-thread windows.
 const (

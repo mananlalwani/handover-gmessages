@@ -131,6 +131,54 @@ func TestConversationMapping(t *testing.T) {
 	_ = protoreflect.Name("")
 }
 
+func TestMultiPartyThreadWithoutGroupFlagBecomesGroup(t *testing.T) {
+	selfIDs := map[string]bool{}
+	conv := &gmproto.Conversation{
+		ConversationID: "old-thread",
+		Type:           gmproto.ConversationType_SMS,
+		IsGroupChat:    false,
+		Participants: []*gmproto.Participant{
+			{ID: &gmproto.SmallInfo{Number: "+15550000", ParticipantID: "self-p"}, IsMe: true},
+			{ID: &gmproto.SmallInfo{Number: "+15550001", ParticipantID: "a"}},
+			{ID: &gmproto.SmallInfo{Number: "+15550002", ParticipantID: "b"}},
+		},
+	}
+	mapped, _, err := mapConversation(conv, selfIDs)
+	if err != nil {
+		t.Fatalf("mapConversation: %v", err)
+	}
+	if mapped.Kind != "group" {
+		t.Errorf("3-party thread kind = %q, want group", mapped.Kind)
+	}
+	if len(mapped.Participants) != 3 {
+		t.Errorf("participants = %d, want 3", len(mapped.Participants))
+	}
+}
+
+func TestDuplicateSelfIdentitiesMerge(t *testing.T) {
+	selfIDs := map[string]bool{}
+	conv := &gmproto.Conversation{
+		ConversationID: "dual-sim",
+		Type:           gmproto.ConversationType_RCS,
+		IsGroupChat:    false,
+		Participants: []*gmproto.Participant{
+			{ID: &gmproto.SmallInfo{Number: "+15550000", ParticipantID: "self-1"}, IsMe: true},
+			{ID: &gmproto.SmallInfo{Number: "+15550000", ParticipantID: "self-2"}, IsMe: true},
+			{ID: &gmproto.SmallInfo{Number: "+15550001", ParticipantID: "peer"}},
+		},
+	}
+	mapped, _, err := mapConversation(conv, selfIDs)
+	if err != nil {
+		t.Fatalf("mapConversation: %v", err)
+	}
+	if mapped.Kind != "direct" {
+		t.Errorf("merged thread kind = %q, want direct", mapped.Kind)
+	}
+	if len(mapped.Participants) != 2 {
+		t.Errorf("participants = %d, want 2", len(mapped.Participants))
+	}
+}
+
 func TestReactionsDropEmpties(t *testing.T) {
 	entries := []*gmproto.ReactionEntry{
 		{Data: &gmproto.ReactionData{Unicode: "❤"}, ParticipantIDs: []string{"a", "b"}},
