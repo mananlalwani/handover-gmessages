@@ -93,12 +93,26 @@ func (s *Session) fullSync(reason string) {
 	if client == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	resp, err := client.ListConversations(ctx, &gmproto.ListConversationsRequest{
-		Count:  conversationPage,
-		Folder: gmproto.ListConversationsRequest_INBOX,
-	})
+	list := func() (*gmproto.ListConversationsResponse, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+		defer cancel()
+		return client.ListConversations(ctx, &gmproto.ListConversationsRequest{
+			Count:  conversationPage,
+			Folder: gmproto.ListConversationsRequest_INBOX,
+		})
+	}
+	resp, err := list()
+	if err != nil {
+		// Match libgm's recovery ladder: a phone that stopped answering
+		// needs its push/active session re-armed before retrying RPCs.
+		if activeErr := func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+			defer cancel()
+			return client.SetActiveSession(ctx)
+		}(); activeErr == nil {
+			resp, err = list()
+		}
+	}
 	if err != nil {
 		s.log.Warn().Err(err).Msg("listing conversations failed")
 		s.emit(Event{Type: "error", Account: s.account, Message: "conversation sync failed"})
