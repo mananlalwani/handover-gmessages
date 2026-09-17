@@ -208,7 +208,11 @@ func (s *Session) connectOnce(ctx context.Context) error {
 	if err := client.FetchConfig(timeout); err != nil {
 		return err
 	}
-	if err := client.Connect(timeout); err != nil {
+	// Connect starts libgm's long-poll loop asynchronously. Do not pass the
+	// short setup timeout here: cancelling it when this function returns
+	// immediately kills the receive loop and leaves the account falsely
+	// online with no conversation/status events.
+	if err := client.Connect(ctx); err != nil {
 		return err
 	}
 	s.mu.Lock()
