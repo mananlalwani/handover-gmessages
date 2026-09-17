@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-"""Build a Handover login envelope from a saved `curl` request.
+"""Build a Handover login envelope from browser cookie material.
 
 Usage:
-    python3 curl-to-envelope.py /tmp/gm/curl.txt |
+    python3 curl-to-envelope.py <cookie-file> |
         handoverctl messages login gmessages:personal
 
-Reads a request copied from browser devtools ("Copy as cURL"), extracts
-the Cookie header, and prints {"cookies": {...}} JSON to stdout. The
-envelope never touches disk; pipe it straight into handoverctl, which
-base64-encodes it from stdin.
+<cookie-file> is either:
+  * a request copied from browser devtools ("Copy as cURL"), from which
+    the Cookie header is extracted, or
+  * a file containing just the raw cookie string (the value of the
+    `cookie:` request header, e.g. "SID=...; HSID=...; ...").
+
+The second form avoids devtools copy quirks entirely: in the Network
+tab, click the /web/config request, open the Headers pane, and copy the
+value of the `cookie` request header into the file.
+
+Prints {"cookies": {...}} JSON to stdout. The envelope never touches
+disk; pipe it straight into handoverctl, which base64-encodes it from
+stdin.
 
 Only cookie names are ever reported in errors, never values. Do not
-paste the curl file or this output into chats, issues, or logs.
+paste the cookie file or this output into chats, issues, or logs.
 """
 
 import json
@@ -30,18 +39,23 @@ def main() -> int:
         print(f"cannot read curl file: {exc}", file=sys.stderr)
         return 1
     match = re.search(r"Cookie:\s*([^\n'\"]+)", raw)
-    if not match:
-        print(
-            "no Cookie header found: re-copy the /web/config request "
-            "as cURL (POSIX/bash)",
-            file=sys.stderr,
-        )
-        return 1
+    if match:
+        header = match.group(1).strip().rstrip("\\")
+    else:
+        # No cURL wrapper: treat the whole file as a raw cookie string.
+        header = " ".join(raw.split())
     jar = {}
-    for piece in match.group(1).strip().rstrip("\\").split(";"):
+    for piece in header.split(";"):
         if "=" in piece:
             key, value = piece.strip().split("=", 1)
             jar[key.strip()] = value.strip()
+    if not jar:
+        print(
+            "no cookies found: save either a devtools cURL copy or the raw "
+            "cookie header value into the file",
+            file=sys.stderr,
+        )
+        return 1
     need = ["SID", "HSID", "SSID", "OSID", "APISID", "SAPISID"]
     missing = [key for key in need if key not in jar]
     if missing:
