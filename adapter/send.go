@@ -227,7 +227,7 @@ func (s *Session) threadMeta(convID string) (*convMeta, error) {
 }
 
 // SendText validates and relays one text message.
-func (s *Session) SendText(requestID, convID, text string) {
+func (s *Session) SendText(requestID, convID, text, replyTo string) {
 	if len([]rune(text)) == 0 || len([]rune(text)) > MaxTextChars {
 		s.failure(requestID, "text rejected")
 		return
@@ -255,6 +255,9 @@ func (s *Session) SendText(requestID, convID, text string) {
 		TmpID:      txn,
 		ForceRCS: meta.convType == gmproto.ConversationType_RCS &&
 			meta.sendMode == gmproto.ConversationSendMode_SEND_MODE_AUTO,
+	}
+	if replyTo != "" {
+		req.Reply = &gmproto.ReplyPayload{MessageID: replyTo}
 	}
 	s.mu.Lock()
 	client := s.client

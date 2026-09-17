@@ -187,8 +187,8 @@ func (h *hub) dispatch(cmd adapter.Command) {
 		if !validAccount(cmd.Account) || cmd.Conversation == "" || cmd.RequestID == "" {
 			return
 		}
-		account, conversation, text, requestID := cmd.Account, cmd.Conversation, cmd.Text, cmd.RequestID
-		go h.session(account).SendText(requestID, conversation, text)
+		account, conversation, text, replyTo, requestID := cmd.Account, cmd.Conversation, cmd.Text, cmd.ReplyTo, cmd.RequestID
+		go h.session(account).SendText(requestID, conversation, text, replyTo)
 	case "send_media":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" || cmd.RequestID == "" || cmd.Path == "" {
 			h.session(cmd.Account).SendResult(cmd.RequestID, false, "unreadable file")

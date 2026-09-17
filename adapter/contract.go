@@ -27,6 +27,7 @@ type Command struct {
 	Conversation string   `json:"conversation,omitempty"`
 	Message      string   `json:"message,omitempty"`
 	Text         string   `json:"text,omitempty"`
+	ReplyTo      string   `json:"reply_to,omitempty"`
 	Caption      string   `json:"caption,omitempty"`
 	Path         string   `json:"path,omitempty"`
 	Emoji        string   `json:"emoji,omitempty"`
