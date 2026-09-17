@@ -179,6 +179,7 @@ type Participant struct {
 type Message struct {
 	LocalID     string       `json:"local_id"`
 	Sender      string       `json:"sender"`
+	Transport   string       `json:"transport,omitempty"`
 	SentAt      *int64       `json:"sent_at,omitempty"`
 	Text        string       `json:"text,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`

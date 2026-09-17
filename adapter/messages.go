@@ -10,6 +10,17 @@ import (
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
 
+func messageTransport(kind int64) string {
+	switch kind {
+	case 1, 2, 3:
+		return "sms"
+	case 4:
+		return "rcs"
+	default:
+		return ""
+	}
+}
+
 // mapMessage converts one relay message into wire form. When download
 // is false (bulk sync windows), media parts keep metadata with no
 // staged path: bytes resolve on explicit history fetches and live
@@ -29,8 +40,9 @@ func (s *Session) mapMessage(convID string, msg *gmproto.Message, download bool)
 	s.rememberMessage(convID, msg, self)
 
 	out := &Message{
-		LocalID: msg.GetMessageID(),
-		Sender:  senderKeyOf(msg),
+		LocalID:   msg.GetMessageID(),
+		Sender:    senderKeyOf(msg),
+		Transport: messageTransport(msg.GetType()),
 	}
 	if ts := msg.GetTimestamp(); ts != 0 {
 		ts := ts
