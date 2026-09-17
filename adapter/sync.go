@@ -127,27 +127,33 @@ func (s *Session) fullSync(reason string) {
 	}
 	results := make([]threadResult, len(resp.GetConversations()))
 	var wg sync.WaitGroup
-	lanes := make(chan struct{}, 8)
 	for i, conv := range resp.GetConversations() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			lanes <- struct{}{}
-			defer func() { <-lanes }()
-			full, err := s.getConversation(conv.GetConversationID())
-			if err != nil {
-				s.log.Warn().Str("conversation", conv.GetConversationID()).Msg("skipping thread")
-				return
+			// ListConversations already returns the authoritative conversation
+			// record. Upstream maps that record directly; doing a GetConversation
+			// RPC for every thread fans one sync into dozens of phone requests
+			// and starves sends/history.
+			mapped, meta, err := s.mapConversation(conv)
+			if err != nil && len(conv.GetParticipants()) == 0 {
+				// Older relay responses may omit participants from list rows.
+				// Keep the compatibility fallback, but only for those rows.
+				full, fetchErr := s.getConversation(conv.GetConversationID())
+				if fetchErr != nil {
+					s.log.Warn().Str("conversation", conv.GetConversationID()).Msg("skipping thread")
+					return
+				}
+				mapped, meta, err = s.mapConversation(full)
 			}
-			mapped, meta, err := s.mapConversation(full)
 			if err != nil {
 				s.log.Warn().Err(err).Msg("skipping thread")
 				return
 			}
 			s.mu.Lock()
-			s.metas[full.GetConversationID()] = meta
+			s.metas[conv.GetConversationID()] = meta
 			s.mu.Unlock()
-			results[i] = threadResult{index: i, thread: mapped, unread: full.GetUnread(), ok: true}
+			results[i] = threadResult{index: i, thread: mapped, unread: conv.GetUnread(), ok: true}
 		}()
 	}
 	wg.Wait()
