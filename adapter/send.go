@@ -278,7 +278,13 @@ func (s *Session) SendText(requestID, convID, text, replyTo string) {
 		Conversation: convID, Message: txn, Status: "accepted"})
 	ctx, cancel := slowCtx()
 	defer cancel()
-	if _, err := client.SendMessage(ctx, req); err != nil {
+	if _, err := sendToRelay(ctx, client, req); err != nil {
+		if errors.Is(err, libgm.ErrPhoneNotResponding) {
+			// The upstream relay may have accepted the request even when
+			// the phone did not return its echo. Keep pending so a late
+			// remote echo can resolve the send.
+			return
+		}
 		s.mu.Lock()
 		delete(s.pending, txn)
 		s.mu.Unlock()
@@ -299,6 +305,30 @@ func classifySendError(err error) string {
 		return "phone not responding"
 	}
 	return "send failed"
+}
+
+var sendRetryBackoff = []time.Duration{3 * time.Second, 8 * time.Second, 20 * time.Second}
+
+func sendToRelay(ctx context.Context, client *libgm.Client, req *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error) {
+	resp, err := client.SendMessage(ctx, req)
+	for attempt := 0; err == nil && resp.GetStatus() != gmproto.SendMessageResponse_SUCCESS && attempt < len(sendRetryBackoff); attempt++ {
+		if resp.GetStatus() != gmproto.SendMessageResponse_FAILURE_2 && resp.GetStatus() != gmproto.SendMessageResponse_FAILURE_3 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(sendRetryBackoff[attempt]):
+		}
+		resp, err = client.SendMessage(ctx, req)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if resp.GetStatus() != gmproto.SendMessageResponse_SUCCESS {
+		return resp, fmt.Errorf("relay rejected send")
+	}
+	return resp, nil
 }
 
 // SendMedia relays one staged file with an optional caption.
@@ -360,7 +390,10 @@ func (s *Session) SendMedia(requestID, convID, path, caption string) {
 	s.result(requestID, true, "")
 	s.emit(Event{Type: "status", Account: s.account,
 		Conversation: convID, Message: txn, Status: "accepted"})
-	if _, err := client.SendMessage(ctx, req); err != nil {
+	if _, err := sendToRelay(ctx, client, req); err != nil {
+		if errors.Is(err, libgm.ErrPhoneNotResponding) {
+			return
+		}
 		s.mu.Lock()
 		delete(s.pending, txn)
 		s.mu.Unlock()
