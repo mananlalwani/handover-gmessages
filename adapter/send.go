@@ -253,8 +253,10 @@ func (s *Session) SendText(requestID, convID, text, replyTo string) {
 		},
 		SIMPayload: metaSIM(s, meta),
 		TmpID:      txn,
-		ForceRCS: meta.convType == gmproto.ConversationType_RCS &&
-			meta.sendMode == gmproto.ConversationSendMode_SEND_MODE_AUTO,
+		// Upstream only forces RCS when an explicit portal setting enables
+		// it. Automatic send mode must not be treated as ForceRCS: doing so
+		// strands fallback/self sends at "sending as RCS".
+		ForceRCS: false,
 	}
 	if replyTo != "" {
 		req.Reply = &gmproto.ReplyPayload{MessageID: replyTo}
@@ -345,8 +347,7 @@ func (s *Session) SendMedia(requestID, convID, path, caption string) {
 		},
 		SIMPayload: metaSIM(s, meta),
 		TmpID:      txn,
-		ForceRCS: meta.convType == gmproto.ConversationType_RCS &&
-			meta.sendMode == gmproto.ConversationSendMode_SEND_MODE_AUTO,
+		ForceRCS:   false,
 	}
 	ctx, cancel := slowCtx()
 	defer cancel()
