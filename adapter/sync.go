@@ -291,8 +291,17 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, 
 	if cursor != nil {
 		id, ts, err := parseCursor(*cursor)
 		if err != nil {
-			s.emit(Event{Type: "error", Account: s.account, Message: "unknown history cursor"})
-			return
+			// The daemon's public history cursor is intentionally just the
+			// oldest message ID. Recover the relay timestamp from our cache;
+			// accepting the daemon cursor here avoids leaking relay details
+			// across the IPC boundary.
+			id = *cursor
+			ts = s.cachedTS(convID, id)
+			if id == "" || ts == 0 {
+				s.emit(Event{Type: "error", Account: s.account, Message: "unknown history cursor"})
+				return
+			}
+			ts /= 1000
 		}
 		rpcCursor = &gmproto.Cursor{LastItemID: id, LastItemTimestamp: ts}
 	}
