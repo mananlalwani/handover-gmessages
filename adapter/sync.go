@@ -321,7 +321,13 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, 
 		evtCursor = mintCursor(relayCursor.GetLastItemID(), relayCursor.GetLastItemTimestamp())
 	} else if uint32(len(out)) == limit && len(out) > 0 {
 		oldest := out[0]
-		evtCursor = mintCursor(oldest.LocalID, s.cachedTS(convID, oldest.LocalID))
+		// libgm's cursor timestamp is milliseconds. Message timestamps in
+		// the normalized/cache path are Google microseconds.
+		ts := s.cachedTS(convID, oldest.LocalID)
+		if ts > 0 {
+			ts /= 1000
+		}
+		evtCursor = mintCursor(oldest.LocalID, ts)
 	}
 	s.emitMessages(convID, out, full, evtCursor)
 }
