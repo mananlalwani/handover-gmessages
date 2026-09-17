@@ -143,18 +143,11 @@ func (s *Session) fullSync(reason string) {
 		}
 	}
 	s.emitConversations(threads)
-	var wwg sync.WaitGroup
-	wlanes := make(chan struct{}, 8)
-	for _, thread := range threads {
-		wwg.Add(1)
-		go func() {
-			defer wwg.Done()
-			wlanes <- struct{}{}
-			defer func() { <-wlanes }()
-			s.emitWindow(thread.LocalID, messageWindow, nil, true, false)
-		}()
-	}
-	wwg.Wait()
+	// Do not fetch a message window for every thread during account sync.
+	// A large library can contain hundreds of conversations, and issuing
+	// hundreds of concurrent phone RPCs starves the relay and makes sends
+	// time out. History is fetched explicitly by the history command; live
+	// events continue to populate the current windows.
 	unreads := map[string]bool{}
 	for _, result := range results {
 		if result.ok {
