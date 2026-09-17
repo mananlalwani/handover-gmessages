@@ -235,7 +235,7 @@ func (s *Session) emitConversations(threads []Conversation) {
 func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorNext string) {
 	if len(msgs) == 0 {
 		s.emit(Event{Type: "messages", Account: s.account, Conversation: convID,
-			Messages: []Message{}, Full: full})
+			Messages: []Message{}, Full: full, PageComplete: true})
 		return
 	}
 	var chunks [][]Message
@@ -255,6 +255,7 @@ func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorN
 			Messages: chunk, Full: full && i == 0}
 		if i == len(chunks)-1 {
 			evt.CursorNext = cursorNext
+			evt.PageComplete = true
 		}
 		s.emit(evt)
 	}

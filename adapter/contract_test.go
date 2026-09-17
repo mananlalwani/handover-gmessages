@@ -239,6 +239,11 @@ func TestChunkedEmissionStaysUnderBound(t *testing.T) {
 	if last.CursorNext != "m:1" {
 		t.Errorf("cursor rides the last chunk, got %q", last.CursorNext)
 	}
+	for i, evt := range got {
+		if evt.PageComplete != (i == len(got)-1) {
+			t.Errorf("only final chunk completes the page: chunk %d complete=%v", i, evt.PageComplete)
+		}
+	}
 	if !got[0].Full || got[1].Full {
 		t.Error("only the first chunk is authoritative")
 	}

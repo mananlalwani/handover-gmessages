@@ -53,6 +53,7 @@ type Event struct {
 	Conversation    string         `json:"conversation,omitempty"`
 	Messages        []Message      `json:"messages,omitempty"`
 	CursorNext      string         `json:"cursor_next,omitempty"`
+	PageComplete    bool           `json:"page_complete,omitempty"`
 	Message         string         `json:"message,omitempty"`
 	Status          string         `json:"status,omitempty"`
 	Participants    []string       `json:"participants,omitempty"`
@@ -102,6 +103,7 @@ func (e Event) MarshalJSON() ([]byte, error) {
 		out["conversation"] = e.Conversation
 		out["messages"] = nonNilMessages(e.Messages)
 		str("cursor_next", e.CursorNext)
+		out["page_complete"] = e.PageComplete
 		out["full"] = e.Full
 	case "message_removed":
 		out["account"] = e.Account
