@@ -44,9 +44,9 @@ func (s *Session) failure(requestID, msg string) {
 	s.result(requestID, false, msg)
 }
 
-func (s *Session) relayFailure(convID, txn, reason string) {
+func (s *Session) relayFailure(convID, txn string) {
 	s.emit(Event{Type: "status", Account: s.account, Conversation: convID,
-		Message: txn, Status: "failed:" + reason})
+		Message: txn, Status: "failed:transport"})
 }
 
 // Login starts Gaia pairing from a user-supplied credential bundle. The
@@ -288,7 +288,7 @@ func (s *Session) SendText(requestID, convID, text, replyTo string) {
 		s.mu.Lock()
 		delete(s.pending, txn)
 		s.mu.Unlock()
-		s.relayFailure(convID, txn, classifySendError(err))
+		s.relayFailure(convID, txn)
 		return
 	}
 }
@@ -397,7 +397,7 @@ func (s *Session) SendMedia(requestID, convID, path, caption string) {
 		s.mu.Lock()
 		delete(s.pending, txn)
 		s.mu.Unlock()
-		s.relayFailure(convID, txn, classifySendError(err))
+		s.relayFailure(convID, txn)
 		return
 	}
 }
