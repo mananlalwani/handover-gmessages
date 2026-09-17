@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -118,6 +119,13 @@ func (s *Session) fullSync(reason string) {
 		s.emit(Event{Type: "error", Account: s.account, Message: "conversation sync failed"})
 		return
 	}
+	// Google returns the inbox as a broad thread library, and ordering is
+	// not stable across sync responses. Present the same useful ordering as
+	// a messaging client: most recently active conversations first.
+	sort.SliceStable(resp.Conversations, func(i, j int) bool {
+		return resp.Conversations[i].GetLastMessageTimestamp() >
+			resp.Conversations[j].GetLastMessageTimestamp()
+	})
 	var threads []Conversation
 	type threadResult struct {
 		index  int
