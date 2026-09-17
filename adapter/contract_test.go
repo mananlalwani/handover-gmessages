@@ -162,3 +162,71 @@ func TestNoGoogleVocabularyCrosses(t *testing.T) {
 		}
 	}
 }
+
+func TestChunkedEmissionStaysUnderBound(t *testing.T) {
+	var got []Event
+	sess := &Session{account: "a", emit: func(e Event) { got = append(got, e) }}
+	threads := make([]Conversation, 0, 400)
+	for i := 0; i < 400; i++ {
+		threads = append(threads, Conversation{
+			LocalID:      "thread",
+			Kind:         "direct",
+			Transport:    "rcs",
+			Participants: []Participant{{LocalID: "p"}, {LocalID: "q"}},
+			Capabilities: rcsCaps,
+		})
+	}
+	sess.emitConversations(threads)
+	if len(got) < 2 {
+		t.Fatalf("400 threads must chunk, got %d events", len(got))
+	}
+	total := 0
+	for i, evt := range got {
+		raw, _ := json.Marshal(evt)
+		if len(raw) > maxEventBytes {
+			t.Errorf("chunk %d is %d bytes", i, len(raw))
+		}
+		if i == 0 && !evt.Full {
+			t.Error("first chunk must be authoritative")
+		}
+		if i > 0 && evt.Full {
+			t.Error("later chunks must merge")
+		}
+		total += len(evt.Conversations)
+	}
+	if total != len(threads) {
+		t.Errorf("chunks cover %d of %d threads", total, len(threads))
+	}
+
+	got = nil
+	msgs := make([]Message, 0, 30)
+	for i := 0; i < 30; i++ {
+		msgs = append(msgs, Message{LocalID: "m", Sender: "p", Text: string(make([]byte, 3000))})
+	}
+	sess.emitMessages("c", msgs, true, "m:1")
+	if len(got) < 2 {
+		t.Fatalf("30 large messages must chunk, got %d events", len(got))
+	}
+	for i, evt := range got {
+		raw, _ := json.Marshal(evt)
+		if len(raw) > maxEventBytes {
+			t.Errorf("chunk %d is %d bytes", i, len(raw))
+		}
+	}
+	last := got[len(got)-1]
+	if last.CursorNext != "m:1" {
+		t.Errorf("cursor rides the last chunk, got %q", last.CursorNext)
+	}
+	if !got[0].Full || got[1].Full {
+		t.Error("only the first chunk is authoritative")
+	}
+}
+
+func TestSanitizeText(t *testing.T) {
+	if got := sanitizeText("a\r\nb\rc\x00d\u007fe\tf"); got != "a\nbcde\tf" {
+		t.Errorf("sanitized = %q", got)
+	}
+	if got := sanitizeText("plain ✓ text"); got != "plain ✓ text" {
+		t.Errorf("readable text altered: %q", got)
+	}
+}

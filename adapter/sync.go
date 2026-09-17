@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,6 +10,20 @@ import (
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
+
+// maxEventBytes keeps every emitted line comfortably under the daemon's
+// 64 KiB inbound bound, leaving headroom for the envelope. Real
+// libraries (86 threads measured 71 KiB) and full message windows
+// otherwise break clients deterministically.
+const maxEventBytes = 48 * 1024
+
+func eventBytes(evt Event) int {
+	raw, err := json.Marshal(evt)
+	if err != nil {
+		return maxEventBytes + 1
+	}
+	return len(raw)
+}
 
 // getConversation fetches one authoritative thread record.
 func (s *Session) getConversation(convID string) (*gmproto.Conversation, error) {
@@ -56,7 +71,7 @@ func (s *Session) FetchHistory(convID string, limit uint32, cursor *string) {
 	if limit < 1 || limit > 100 {
 		limit = messageWindow
 	}
-	s.emitWindow(convID, limit, cursor)
+	s.emitWindow(convID, limit, cursor, false)
 }
 
 // SendResult reports acceptance for commands rejected before any relay
@@ -105,9 +120,9 @@ func (s *Session) fullSync(reason string) {
 		s.mu.Unlock()
 		threads = append(threads, mapped)
 	}
-	s.emit(Event{Type: "conversations", Account: s.account, Conversations: threads, Full: true})
+	s.emitConversations(threads)
 	for _, thread := range threads {
-		s.emitWindow(thread.LocalID, messageWindow, nil)
+		s.emitWindow(thread.LocalID, messageWindow, nil, true)
 		s.emit(Event{Type: "read", Account: s.account, Conversation: thread.LocalID,
 			Unread: s.threadUnread(thread.LocalID)})
 	}
@@ -125,8 +140,67 @@ func (s *Session) threadUnread(convID string) bool {
 	return conv.GetUnread()
 }
 
-// parseCursor decodes an adapter-minted opaque cursor ("id:timestamp").
+// emitConversations sends the thread list in size-bounded chunks. The
+// first chunk is authoritative so the daemon reconciles; later chunks
+// merge. Small libraries keep the single full event; large ones converge
+// to the same set with transient remove/re-add churn on re-syncs.
+func (s *Session) emitConversations(threads []Conversation) {
+	if len(threads) == 0 {
+		s.emit(Event{Type: "conversations", Account: s.account,
+			Conversations: []Conversation{}, Full: true})
+		return
+	}
+	var chunks [][]Conversation
+	var cur []Conversation
+	for _, thread := range threads {
+		trial := append(append([]Conversation{}, cur...), thread)
+		if len(cur) > 0 && eventBytes(Event{Type: "conversations", Account: s.account,
+			Conversations: trial, Full: true}) > maxEventBytes {
+			chunks = append(chunks, cur)
+			cur = nil
+		}
+		cur = append(cur, thread)
+	}
+	chunks = append(chunks, cur)
+	for i, chunk := range chunks {
+		s.emit(Event{Type: "conversations", Account: s.account,
+			Conversations: chunk, Full: i == 0})
+	}
+}
+
+// emitMessages sends one window in size-bounded chunks with the same
+// first-authoritative-then-merge pattern. cursorNext rides the last
+// chunk only.
+func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorNext string) {
+	if len(msgs) == 0 {
+		s.emit(Event{Type: "messages", Account: s.account, Conversation: convID,
+			Messages: []Message{}, Full: full})
+		return
+	}
+	var chunks [][]Message
+	var cur []Message
+	for _, msg := range msgs {
+		trial := append(append([]Message{}, cur...), msg)
+		if len(cur) > 0 && eventBytes(Event{Type: "messages", Account: s.account,
+			Conversation: convID, Messages: trial, Full: full}) > maxEventBytes {
+			chunks = append(chunks, cur)
+			cur = nil
+		}
+		cur = append(cur, msg)
+	}
+	chunks = append(chunks, cur)
+	for i, chunk := range chunks {
+		evt := Event{Type: "messages", Account: s.account, Conversation: convID,
+			Messages: chunk, Full: full && i == 0}
+		if i == len(chunks)-1 {
+			evt.CursorNext = cursorNext
+		}
+		s.emit(evt)
+	}
+}
+
 // Foreign cursors are an error, never guessed.
+// parseCursor decodes an adapter-minted opaque cursor ("id:timestamp").
 func parseCursor(cursor string) (id string, ts int64, err error) {
 	id, raw, ok := strings.Cut(cursor, ":")
 	if !ok || id == "" {
@@ -145,7 +219,7 @@ func mintCursor(id string, ts int64) string {
 
 // emitWindow pages one thread window and emits it. full=false pages merge
 // downstream; the daemon reconciles only full sync windows.
-func (s *Session) emitWindow(convID string, limit uint32, cursor *string) {
+func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full bool) {
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
@@ -182,12 +256,12 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string) {
 			out = append(out, *mapped)
 		}
 	}
-	evt := Event{Type: "messages", Account: s.account, Conversation: convID, Messages: out}
+	evtCursor := ""
 	if uint32(len(out)) == limit && len(out) > 0 {
 		oldest := out[0]
-		evt.CursorNext = mintCursor(oldest.LocalID, s.cachedTS(convID, oldest.LocalID))
+		evtCursor = mintCursor(oldest.LocalID, s.cachedTS(convID, oldest.LocalID))
 	}
-	s.emit(evt)
+	s.emitMessages(convID, out, full, evtCursor)
 }
 
 // handleMessage processes one live relay message: tombstones are skipped,

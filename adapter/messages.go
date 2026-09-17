@@ -42,7 +42,11 @@ func (s *Session) mapMessage(convID string, msg *gmproto.Message) (*Message, str
 	media := mediaParts(msg)
 	hasContent := len(texts) > 0 || len(media) > 0
 	if len(texts) > 0 {
-		joined := strings.Join(texts, "\n")
+		cleaned := make([]string, 0, len(texts))
+		for _, part := range texts {
+			cleaned = append(cleaned, sanitizeText(part))
+		}
+		joined := strings.Join(cleaned, "\n")
 		out.Text = joined
 	}
 	for i, part := range media {
@@ -68,6 +72,27 @@ func (s *Session) mapMessage(convID string, msg *gmproto.Message) (*Message, str
 		return nil, ""
 	}
 	return out, ""
+}
+
+// sanitizeText normalizes relay text into the daemon's accepted shape:
+// CRLF becomes LF, lone carriage returns are dropped, and control
+// characters other than \n and \t are removed. Real phone text
+// (notably \r\n line endings) would otherwise be rejected downstream
+// and the message lost. Nothing readable is altered.
+func sanitizeText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	var sb strings.Builder
+	sb.Grow(len(text))
+	for _, r := range text {
+		if r == '\n' || r == '\t' {
+			sb.WriteRune(r)
+		} else if r < 0x20 || r == 0x7f {
+			continue
+		} else {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
 }
 
 // senderKeyOf resolves the sender key, preferring the explicit sender

@@ -69,6 +69,14 @@ func (s *Session) Login(bundle []byte) {
 	s.mu.Lock()
 	if s.pairCancel != nil {
 		s.pairCancel()
+		s.pairCancel = nil
+	}
+	// Never run two relay sessions for one account: a lingering
+	// pairing-era poll makes the server invalidate the new session
+	// (observed as an instant GaiaLoggedOut right after auth).
+	if s.client != nil {
+		s.client.Disconnect()
+		s.client = nil
 	}
 	s.auth = auth
 	s.buildClient(auth)
@@ -123,6 +131,10 @@ func (s *Session) finishPairing(ps *libgm.PairingSession, ctx context.Context) {
 		s.emit(Event{Type: "error", Account: s.account, Message: classifyPairError(err)})
 		return
 	}
+	// Tear down the pairing-era poll before connecting: two concurrent
+	// polls for one identity get the session invalidated server-side
+	// (observed as an instant GaiaLoggedOut right after auth).
+	client.Disconnect()
 	if err := s.store.SaveAuth(s.account, s.auth); err != nil {
 		s.emit(Event{Type: "error", Account: s.account, Message: "storing session failed"})
 		return
@@ -603,7 +615,7 @@ func (s *Session) Open(requestID string, addresses []string) {
 		s.mu.Unlock()
 		s.emit(Event{Type: "conversations", Account: s.account,
 			Conversations: []Conversation{mapped}})
-		s.emitWindow(conv.GetConversationID(), messageWindow, nil)
+		s.emitWindow(conv.GetConversationID(), messageWindow, nil, false)
 	}
 }
 
