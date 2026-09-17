@@ -42,6 +42,7 @@ type Session struct {
 
 	mu         sync.Mutex
 	client     *libgm.Client
+	clientGen  uint64
 	auth       *libgm.AuthData
 	sims       map[string]*gmproto.SIMCard
 	metas      map[string]*convMeta
@@ -103,6 +104,8 @@ func (s *Session) buildClient(auth *libgm.AuthData) {
 	// decode to phone numbers); it stays at warn unconditionally while
 	// the adapter's own logger follows HANDOVER_ADAPTER_DEBUG.
 	relayLog := s.log.With().Str("component", "libgm").Logger().Level(zerolog.WarnLevel)
+	s.clientGen++
+	gen := s.clientGen
 	s.client = libgm.NewClient(
 		auth,
 		nil,
@@ -110,6 +113,12 @@ func (s *Session) buildClient(auth *libgm.AuthData) {
 		exhttp.ClientSettings{},
 	)
 	s.client.SetEventHandler(func(evt any) {
+		s.mu.Lock()
+		current := s.clientGen == gen
+		s.mu.Unlock()
+		if !current {
+			return
+		}
 		select {
 		case s.events <- evt:
 		default:
