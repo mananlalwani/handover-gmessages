@@ -155,15 +155,16 @@ func nonNilStrings(in []string) []string {
 // Conversation is the wire form of one thread. Field names are generic:
 // no Google protocol vocabulary crosses the process boundary.
 type Conversation struct {
-	LocalID       string        `json:"local_id"`
-	Kind          string        `json:"kind"`      // direct|group
-	Transport     string        `json:"transport"` // rcs|sms|mms|unknown
-	Title         string        `json:"title,omitempty"`
-	Participants  []Participant `json:"participants,omitempty"`
-	LatestMessage string        `json:"latest_message,omitempty"`
-	UnreadCount   *uint64       `json:"unread_count,omitempty"`
-	Cursor        string        `json:"cursor,omitempty"`
-	Capabilities  []string      `json:"capabilities,omitempty"`
+	LocalID        string        `json:"local_id"`
+	Kind           string        `json:"kind"`      // direct|group
+	Transport      string        `json:"transport"` // rcs|sms|mms|unknown
+	Title          string        `json:"title,omitempty"`
+	Participants   []Participant `json:"participants,omitempty"`
+	LatestMessage  string        `json:"latest_message,omitempty"`
+	LastActivityAt int64         `json:"last_activity_at,omitempty"`
+	UnreadCount    *uint64       `json:"unread_count,omitempty"`
+	Cursor         string        `json:"cursor,omitempty"`
+	Capabilities   []string      `json:"capabilities,omitempty"`
 }
 
 // Participant is one thread member with an opaque sender key.

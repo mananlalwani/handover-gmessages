@@ -147,6 +147,7 @@ func mapConversation(conv *gmproto.Conversation, selfIDs map[string]bool) (Conve
 	if conv.GetLatestMessageID() != "" {
 		out.LatestMessage = conv.GetLatestMessageID()
 	}
+	out.LastActivityAt = conv.GetLastMessageTimestamp()
 	meta := &convMeta{
 		outgoingID: conv.GetDefaultOutgoingID(),
 		convType:   conv.GetType(),
