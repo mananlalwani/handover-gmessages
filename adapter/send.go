@@ -186,11 +186,26 @@ func joinNames(names []string) string {
 func (s *Session) simPayload(outgoingID string) *gmproto.SIMPayload {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sims[outgoingID].GetSIMData().GetSIMPayload()
+	sim := s.sims[outgoingID]
+	if sim == nil {
+		return nil
+	}
+	return sim.GetSIMData().GetSIMPayload()
 }
 
 // threadMeta refreshes and returns outbound metadata for a thread.
 func (s *Session) threadMeta(convID string) (*convMeta, error) {
+	// Sync stores the authoritative metadata needed for outbound requests.
+	// Do not make a second phone round-trip on every send: on a sleeping or
+	// busy phone that lookup can time out before SendMessage is attempted.
+	s.mu.Lock()
+	if meta := s.metas[convID]; meta != nil {
+		copy := *meta
+		s.mu.Unlock()
+		return &copy, nil
+	}
+	s.mu.Unlock()
+
 	conv, err := s.getConversation(convID)
 	if err != nil {
 		return nil, err

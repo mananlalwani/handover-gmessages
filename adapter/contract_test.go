@@ -4,7 +4,29 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
+
+func TestThreadMetaUsesCachedMetadata(t *testing.T) {
+	s := NewSession("a", nil, zerolog.Nop(), func(Event) {})
+	s.metas["154"] = &convMeta{
+		outgoingID: "self",
+		convType:   gmproto.ConversationType_SMS,
+	}
+	meta, err := s.threadMeta("154")
+	if err != nil {
+		t.Fatalf("threadMeta: %v", err)
+	}
+	if meta.outgoingID != "self" || meta.convType != gmproto.ConversationType_SMS {
+		t.Fatalf("unexpected cached metadata: %+v", meta)
+	}
+	meta.outgoingID = "mutated"
+	if s.metas["154"].outgoingID != "self" {
+		t.Fatal("threadMeta returned the cache pointer")
+	}
+}
 
 // decode emulates the daemon side loosely: required keys must be present
 // with the right JSON types. This guards the exact v1 shapes without
