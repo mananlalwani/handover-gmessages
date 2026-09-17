@@ -164,6 +164,7 @@ func TestDuplicateSelfIdentitiesMerge(t *testing.T) {
 		Participants: []*gmproto.Participant{
 			{ID: &gmproto.SmallInfo{Number: "+15550000", ParticipantID: "self-1"}, IsMe: true},
 			{ID: &gmproto.SmallInfo{Number: "+15550000", ParticipantID: "self-2"}, IsMe: true},
+			{ID: &gmproto.SmallInfo{Number: "+15550000", ParticipantID: "me-alias"}},
 			{ID: &gmproto.SmallInfo{Number: "+15550001", ParticipantID: "peer"}},
 		},
 	}

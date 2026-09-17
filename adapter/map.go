@@ -85,11 +85,24 @@ func mapConversation(conv *gmproto.Conversation, selfIDs map[string]bool) (Conve
 	}
 	participants := make([]Participant, 0, len(conv.GetParticipants()))
 	seen := map[string]bool{}
+	selfAddresses := map[string]bool{}
+	for _, p := range conv.GetParticipants() {
+		if p != nil && p.GetIsMe() && p.GetID().GetNumber() != "" {
+			selfAddresses[p.GetID().GetNumber()] = true
+		}
+	}
 	selfKept := false
 	for _, p := range conv.GetParticipants() {
 		mapped := mapParticipant(p, selfIDs)
 		if mapped.LocalID == "" {
 			continue
+		}
+		// Some relay records mark one copy of the local identity as
+		// IsMe but return another copy (often named "Me") without the
+		// flag. The verified address links those records to the same
+		// local identity; do not expose the duplicate as a group member.
+		if selfAddresses[mapped.Address] {
+			mapped.IsSelf = true
 		}
 		if seen[mapped.LocalID] {
 			continue
