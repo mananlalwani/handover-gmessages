@@ -317,7 +317,9 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, 
 		}
 	}
 	evtCursor := ""
-	if uint32(len(out)) == limit && len(out) > 0 {
+	if relayCursor := resp.GetCursor(); relayCursor != nil && relayCursor.GetLastItemID() != "" {
+		evtCursor = mintCursor(relayCursor.GetLastItemID(), relayCursor.GetLastItemTimestamp())
+	} else if uint32(len(out)) == limit && len(out) > 0 {
 		oldest := out[0]
 		evtCursor = mintCursor(oldest.LocalID, s.cachedTS(convID, oldest.LocalID))
 	}
