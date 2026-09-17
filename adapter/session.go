@@ -21,6 +21,8 @@ import (
 // abandoned.
 const rpcTimeout = 60 * time.Second
 const slowTimeout = 3 * time.Minute
+const resumeCheckInterval = 30 * time.Second
+const resumeGapThreshold = 2 * time.Minute
 
 // syncPage bounds conversation listing and per-thread windows.
 const (
@@ -41,6 +43,7 @@ type Session struct {
 	emit    func(Event)
 
 	mu         sync.Mutex
+	syncMu     sync.Mutex
 	client     *libgm.Client
 	clientGen  uint64
 	auth       *libgm.AuthData
@@ -84,7 +87,7 @@ type LoginBundle struct {
 }
 
 func NewSession(account string, store *Store, log zerolog.Logger, emit func(Event)) *Session {
-	return &Session{
+	session := &Session{
 		account: account,
 		store:   store,
 		log:     log.With().Str("account", account).Logger(),
@@ -96,6 +99,52 @@ func NewSession(account string, store *Store, log zerolog.Logger, emit func(Even
 		pending: map[string]pendingSend{},
 		events:  make(chan any, eventQueue),
 		closed:  make(chan struct{}),
+	}
+	go session.resumeLoop()
+	return session
+}
+
+func wallClockJumped(previous, current time.Time) bool {
+	return current.UnixNano()-previous.UnixNano() > int64(resumeGapThreshold+resumeCheckInterval)
+}
+
+// resumeLoop detects suspend using wall time rather than Go's monotonic
+// clock, which intentionally stops advancing while Linux is suspended.
+// It does not poll messages during normal operation.
+func (s *Session) resumeLoop() {
+	ticker := time.NewTicker(resumeCheckInterval)
+	defer ticker.Stop()
+	previous := time.Now()
+	for {
+		select {
+		case current := <-ticker.C:
+			if wallClockJumped(previous, current) {
+				s.log.Info().Msg("system resume detected; refreshing relay state")
+				s.refreshAfterResume()
+			}
+			previous = current
+		case <-s.closed:
+			return
+		}
+	}
+}
+
+func (s *Session) refreshAfterResume() {
+	s.mu.Lock()
+	client := s.client
+	connected := s.connected
+	s.mu.Unlock()
+	if client == nil || !connected {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+	err := client.SetActiveSession(ctx)
+	cancel()
+	if err != nil {
+		s.log.Warn().Msg("re-arming relay after resume failed")
+	}
+	if !s.fullSync("resume") {
+		s.log.Warn().Msg("conversation sync after resume failed")
 	}
 }
 

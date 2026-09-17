@@ -88,6 +88,8 @@ func (s *Session) SendResult(requestID string, ok bool, errMsg string) {
 // unread flags. Failures are per-thread; one bad thread never aborts
 // the sync.
 func (s *Session) fullSync(reason string) bool {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
