@@ -87,12 +87,12 @@ func (s *Session) SendResult(requestID string, ok bool, errMsg string) {
 // so the daemon reconciles), one window per thread, and thread-level
 // unread flags. Failures are per-thread; one bad thread never aborts
 // the sync.
-func (s *Session) fullSync(reason string) {
+func (s *Session) fullSync(reason string) bool {
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
 	if client == nil {
-		return
+		return false
 	}
 	list := func() (*gmproto.ListConversationsResponse, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
@@ -117,7 +117,7 @@ func (s *Session) fullSync(reason string) {
 	if err != nil {
 		s.log.Warn().Err(err).Msg("listing conversations failed")
 		s.emit(Event{Type: "error", Account: s.account, Message: "conversation sync failed"})
-		return
+		return false
 	}
 	// Google returns the inbox as a broad thread library, and ordering is
 	// not stable across sync responses. Present the same useful ordering as
@@ -190,6 +190,7 @@ func (s *Session) fullSync(reason string) {
 		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
 	}
 	s.log.Debug().Str("reason", reason).Int("threads", len(threads)).Msg("sync complete")
+	return true
 }
 
 func (s *Session) threadUnread(convID string) bool {

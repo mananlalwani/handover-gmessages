@@ -229,12 +229,20 @@ func (s *Session) connectOnce(ctx context.Context) error {
 	// running ListConversations immediately races the callback and can leave
 	// the first sync waiting for a response that the phone never produces.
 	go func() {
-		timer := time.NewTimer(3 * time.Second)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			s.fullSync("connect")
-		case <-s.closed:
+		for attempt, delay := range []time.Duration{3 * time.Second, 5 * time.Second, 15 * time.Second} {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+				if s.fullSync("connect") {
+					return
+				}
+				s.log.Warn().Int("attempt", attempt+1).Msg("conversation sync will retry")
+			case <-s.closed:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			}
 		}
 	}()
 	return nil
