@@ -36,7 +36,7 @@ read, and typing operations. Acceptance is distinct from later attested
 
 ```sh
 handoverctl messages history gmessages:personal:<thread> --limit 20
-handoverctl messages send gmessages:personal:<thread> "handover test — ignore"
+handoverctl messages send gmessages:personal:<thread> "handover test - ignore"
 handoverctl monitor
 ```
 

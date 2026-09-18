@@ -16,7 +16,7 @@ Do not copy or vendor this code, upstream `libgm`, Google protocol definitions,
 or generated protobufs into Handover. The two repositories share only the
 coarse JSON helper contract documented in Handover's
 [`docs/gmessages-sidecar.md`](https://github.com/mananlalwani/handover/blob/main/docs/gmessages-sidecar.md).
-That boundary carries normalized records and opaque IDs—not Google types,
+That boundary carries normalized records and opaque IDs, not Google types,
 cookies, tokens, keys, contacts, or message bodies.
 
 ## Responsibilities
