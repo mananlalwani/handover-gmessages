@@ -20,8 +20,8 @@ import (
 	"os"
 	"sync"
 
+	"github.com/mananlalwani/handover-gmessages/adapter"
 	"github.com/rs/zerolog"
-	"handover-gmessages-adapter/adapter"
 )
 
 const adapterName = "handover-gmessages-adapter/libgm"

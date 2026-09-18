@@ -1,4 +1,4 @@
-module handover-gmessages-adapter
+module github.com/mananlalwani/handover-gmessages
 
 go 1.27.0
 

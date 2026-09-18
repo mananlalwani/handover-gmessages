@@ -9,17 +9,42 @@ to a real recipient.
 1. In a private browser window for one Google account, open:
 
    `https://accounts.google.com/AccountChooser?continue=https://messages.google.com/web/config`
-2. Reload the page, copy the `/web/config` request from developer tools, and
-   create the documented cookie envelope locally.
-3. Base64 the envelope without newlines and pipe it to Handover:
+2. Reload the page, copy the `/web/config` request as cURL from developer tools,
+   and save it to a local file. Do not paste the request into a shell command.
+   Restrict the file while it exists:
 
    ```sh
-   printf '%s' '<base64-envelope>' |
-     handoverctl messages login gmessages:personal --from-file /dev/stdin
+   umask 077
+   curl_file="$(mktemp)"
+   trap 'rm -f "$curl_file"' EXIT
+   "${EDITOR:-vi}" "$curl_file"
    ```
 
-   The bundle must never appear in argv, shell history, logs, or a committed
-   file.
+   Paste the browser's "Copy as cURL" output into the editor, save, and exit.
+   The temporary file has mode 0600 because of `umask 077`.
+
+3. Convert that local file to the adapter's JSON envelope and send it through
+   stdin. The cookie values stay out of the command line and shell history:
+
+   ```sh
+   python3 contrib/curl-to-envelope.py "$curl_file" |
+     handoverctl messages login gmessages:personal
+   ```
+
+   The same command accepts a file containing only the `Cookie` header value.
+   The adapter envelope is UTF-8 JSON with this shape. Replace the values in a
+   local file or let the converter create it; never put real values in a shell
+   command, issue, or document:
+
+   ```json
+   {"cookies":{"SID":"<value>","HSID":"<value>","SSID":"<value>","OSID":"<value>","APISID":"<value>","SAPISID":"<value>"}}
+   ```
+
+   `SID`, `HSID`, `SSID`, `OSID`, `APISID`, and `SAPISID` are required. The
+   converter validates their presence, and the adapter stores the resulting
+   session under `${XDG_STATE_HOME:-~/.local/state}/handover/gmessages-adapter`.
+   Remove any source file immediately after login. The bundle must never appear
+   in argv, shell history, logs, or a committed file.
 4. Confirm the matching emoji in Google Messages when prompted.
 5. Verify the account and conversations:
 
