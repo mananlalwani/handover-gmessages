@@ -9,7 +9,7 @@ Usage:
   * a request copied from browser devtools ("Copy as cURL"), from which
     the Cookie header is extracted, or
   * a file containing just the raw cookie string (the value of the
-    `cookie:` request header, e.g. "SID=...; HSID=...; ...").
+    `Cookie:` request header, e.g. "SID=...; HSID=...; ...").
 
 The second form avoids devtools copy quirks entirely: in the Network
 tab, click the /web/config request, open the Headers pane, and copy the
@@ -28,6 +28,30 @@ import re
 import sys
 
 
+COOKIE_HEADER = re.compile(
+    r'''(?i)(?:^|[\s'\"])(?:cookie)\s*:\s*([^'\"\r\n\\]*)'''
+)
+REQUIRED_COOKIES = ["SID", "HSID", "SSID", "OSID", "APISID", "SAPISID"]
+
+
+def cookie_header(raw: str) -> str:
+    match = COOKIE_HEADER.search(raw)
+    if match:
+        return match.group(1).strip().rstrip("\\").strip()
+    # No cURL wrapper: treat the whole file as a raw cookie string.
+    return " ".join(raw.split())
+
+
+def parse_cookies(header: str) -> dict[str, str]:
+    cookies = {}
+    for piece in header.split(";"):
+        if "=" in piece:
+            key, value = piece.strip().split("=", 1)
+            if key.strip():
+                cookies[key.strip()] = value.strip()
+    return cookies
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: curl-to-envelope.py <curl-file>", file=sys.stderr)
@@ -38,17 +62,7 @@ def main() -> int:
     except OSError as exc:
         print(f"cannot read curl file: {exc}", file=sys.stderr)
         return 1
-    match = re.search(r"Cookie:\s*([^\n'\"]+)", raw)
-    if match:
-        header = match.group(1).strip().rstrip("\\")
-    else:
-        # No cURL wrapper: treat the whole file as a raw cookie string.
-        header = " ".join(raw.split())
-    jar = {}
-    for piece in header.split(";"):
-        if "=" in piece:
-            key, value = piece.strip().split("=", 1)
-            jar[key.strip()] = value.strip()
+    jar = parse_cookies(cookie_header(raw))
     if not jar:
         print(
             "no cookies found: save either a devtools cURL copy or the raw "
@@ -56,8 +70,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    need = ["SID", "HSID", "SSID", "OSID", "APISID", "SAPISID"]
-    missing = [key for key in need if key not in jar]
+    missing = [key for key in REQUIRED_COOKIES if key not in jar]
     if missing:
         print(
             "missing cookies: "

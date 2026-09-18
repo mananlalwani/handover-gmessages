@@ -40,8 +40,10 @@ to a real recipient.
    {"cookies":{"SID":"<value>","HSID":"<value>","SSID":"<value>","OSID":"<value>","APISID":"<value>","SAPISID":"<value>"}}
    ```
 
-   `SID`, `HSID`, `SSID`, `OSID`, `APISID`, and `SAPISID` are required. The
-   converter validates their presence, and the adapter stores the resulting
+   `SID`, `HSID`, `SSID`, `OSID`, `APISID`, and `SAPISID` are the minimum
+   required cookies. The converter preserves every cookie it captures because
+   Google may require additional cookies for a particular account or session.
+   It validates the six minimum names, and the adapter stores the resulting
    session under `${XDG_STATE_HOME:-~/.local/state}/handover/gmessages-adapter`.
    Remove any source file immediately after login. The bundle must never appear
    in argv, shell history, logs, or a committed file.
