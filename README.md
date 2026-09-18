@@ -66,35 +66,11 @@ configuration files, flags, or secrets in argv are required.
 
 Set `HANDOVER_ADAPTER_DEBUG=1` for additional still-redacted diagnostics.
 
-## Pair an account
+## Pairing and operations
 
-This procedure requires the phone and Google account owner. Credentials stay on
-the local machine and are never passed as command-line arguments.
-
-1. In a private browser window for one Google account, open
-   `https://accounts.google.com/AccountChooser?continue=https://messages.google.com/web/config`.
-2. Reload the page, copy the `/web/config` request from browser developer tools,
-   and create the documented cookie envelope locally.
-3. Base64 the envelope without newlines and pipe it to Handover:
-
-   ```sh
-   printf '%s' '<base64-envelope>' |
-     handoverctl messages login gmessages:personal --from-file /dev/stdin
-   ```
-
-4. Confirm the matching emoji in Google Messages when the adapter displays the
-   pairing prompt.
-5. Verify the account and conversations:
-
-   ```sh
-   handoverctl messages accounts
-   handoverctl messages conversations gmessages:personal
-   ```
-
-For development, use a self/consenting conversation. Login, history, send,
-send-file, reply, react, read, typing, restart, and logout flows are covered by
-the repository's runbook and tests. Never use a real recipient for an automated
-send test.
+Follow [`docs/pairing-runbook.md`](docs/pairing-runbook.md) for account login,
+emoji confirmation, self/consenting-conversation checks, restart recovery, and
+logout. Credentials stay local and are never passed as command-line arguments.
 
 ## Limits
 
