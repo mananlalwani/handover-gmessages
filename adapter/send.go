@@ -39,7 +39,7 @@ func (s *Session) result(requestID string, ok bool, errMsg string) {
 	if !ok && errMsg != "" {
 		evt.Error = errMsg
 	}
-	s.emit(evt)
+	s.fire(evt)
 }
 
 func (s *Session) failure(requestID, msg string) {
@@ -47,7 +47,7 @@ func (s *Session) failure(requestID, msg string) {
 }
 
 func (s *Session) relayFailure(convID, txn string) {
-	s.emit(Event{Type: "status", Account: s.account, Conversation: convID,
+	s.fire(Event{Type: "status", Account: s.account, Conversation: convID,
 		Message: txn, Status: "failed:transport"})
 }
 
@@ -57,7 +57,7 @@ func (s *Session) relayFailure(convID, txn string) {
 func (s *Session) Login(bundle []byte) {
 	var parsed LoginBundle
 	if err := json.Unmarshal(bundle, &parsed); err != nil || len(parsed.Cookies) == 0 {
-		s.emit(Event{Type: "error", Account: s.account, Message: "login bundle rejected"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "login bundle rejected"})
 		return
 	}
 	var missing []string
@@ -67,14 +67,14 @@ func (s *Session) Login(bundle []byte) {
 		}
 	}
 	if len(missing) > 0 {
-		s.emit(Event{Type: "error", Account: s.account,
+		s.fire(Event{Type: "error", Account: s.account,
 			Message: "login bundle missing cookies: " + joinNames(missing)})
 		return
 	}
 	auth := libgm.NewAuthData()
 	auth.SetCookies(parsed.Cookies)
 	if err := s.store.SaveAuth(s.account, auth); err != nil {
-		s.emit(Event{Type: "error", Account: s.account, Message: "storing session failed"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "storing session failed"})
 		return
 	}
 	s.mu.Lock()
@@ -93,12 +93,12 @@ func (s *Session) Login(bundle []byte) {
 	s.buildClient(auth)
 	client := s.client
 	s.mu.Unlock()
-	go s.eventLoop()
+	s.runEventLoop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	if err := client.FetchConfig(ctx); err != nil {
 		cancel()
-		s.emit(Event{Type: "error", Account: s.account, Message: "relay unreachable during pairing"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "relay unreachable during pairing"})
 		return
 	}
 	pairCtx, pairCancel := context.WithCancel(context.Background())
@@ -108,17 +108,17 @@ func (s *Session) Login(bundle []byte) {
 	emoji, ps, err := client.StartGaiaPairing(ctx, pairCtx)
 	cancel()
 	if err != nil {
-		s.emit(Event{Type: "error", Account: s.account, Message: classifyPairError(err)})
+		s.fire(Event{Type: "error", Account: s.account, Message: classifyPairError(err)})
 		return
 	}
 	s.mu.Lock()
 	s.ps = ps
 	s.mu.Unlock()
-	s.emit(Event{Type: "account", Account: s.account, Label: "Google Messages",
+	s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
 		Connected: true, Authenticated: false})
 	// The prompt is an opaque verification string (the emoji to confirm
 	// on the phone). Display it; it carries no secret.
-	s.emit(Event{Type: "pairing", Account: s.account,
+	s.fire(Event{Type: "pairing", Account: s.account,
 		Prompt: "Tap " + emoji + " in Google Messages on the phone to confirm linking"})
 	go s.finishPairing(ps, pairCtx)
 }
@@ -139,7 +139,7 @@ func (s *Session) finishPairing(ps *libgm.PairingSession, ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		s.emit(Event{Type: "error", Account: s.account, Message: classifyPairError(err)})
+		s.fire(Event{Type: "error", Account: s.account, Message: classifyPairError(err)})
 		return
 	}
 	// Tear down the pairing-era poll before connecting: two concurrent
@@ -147,10 +147,10 @@ func (s *Session) finishPairing(ps *libgm.PairingSession, ctx context.Context) {
 	// (observed as an instant GaiaLoggedOut right after auth).
 	client.Disconnect()
 	if err := s.store.SaveAuth(s.account, s.auth); err != nil {
-		s.emit(Event{Type: "error", Account: s.account, Message: "storing session failed"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "storing session failed"})
 		return
 	}
-	go s.connectLoop(context.Background())
+	s.runConnectLoop(context.Background())
 }
 
 func classifyPairError(err error) string {
@@ -273,10 +273,11 @@ func (s *Session) SendText(requestID, convID, text, replyTo string) {
 	// Acceptance means the helper queued the relay operation. The phone's
 	// eventual response is reported separately as a lifecycle status.
 	s.mu.Lock()
-	s.pending[txn] = pendingSend{requestID: requestID, convID: convID}
+	s.sweepPending()
+	s.pending[txn] = pendingSend{requestID: requestID, convID: convID, at: time.Now()}
 	s.mu.Unlock()
 	s.result(requestID, true, "")
-	s.emit(Event{Type: "status", Account: s.account,
+	s.fire(Event{Type: "status", Account: s.account,
 		Conversation: convID, Message: txn, Status: "accepted"})
 	ctx, cancel := slowCtx()
 	defer cancel()
@@ -387,10 +388,11 @@ func (s *Session) SendMedia(requestID, convID, path, caption string) {
 	ctx, cancel := slowCtx()
 	defer cancel()
 	s.mu.Lock()
-	s.pending[txn] = pendingSend{requestID: requestID, convID: convID}
+	s.sweepPending()
+	s.pending[txn] = pendingSend{requestID: requestID, convID: convID, at: time.Now()}
 	s.mu.Unlock()
 	s.result(requestID, true, "")
-	s.emit(Event{Type: "status", Account: s.account,
+	s.fire(Event{Type: "status", Account: s.account,
 		Conversation: convID, Message: txn, Status: "accepted"})
 	if _, err := sendToRelay(ctx, client, req); err != nil {
 		if errors.Is(err, libgm.ErrPhoneNotResponding) {
@@ -556,36 +558,36 @@ func (s *Session) MarkRead(convID, msgID string) {
 	if msgID == "" {
 		conv, err := s.getConversation(convID)
 		if err != nil {
-			s.emit(Event{Type: "error", Account: s.account, Message: "unknown conversation"})
+			s.fire(Event{Type: "error", Account: s.account, Message: "unknown conversation"})
 			return
 		}
 		msgID = conv.GetLatestMessageID()
 	}
 	if msgID == "" {
-		s.emit(Event{Type: "error", Account: s.account, Message: "nothing to mark read"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "nothing to mark read"})
 		return
 	}
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
 	if client == nil {
-		s.emit(Event{Type: "error", Account: s.account, Message: "not connected"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "not connected"})
 		return
 	}
 	ctx, cancel := timeoutCtx()
 	defer cancel()
 	if err := client.MarkRead(ctx, convID, msgID); err != nil {
-		s.emit(Event{Type: "error", Account: s.account, Message: "mark read failed"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "mark read failed"})
 		return
 	}
-	s.emit(Event{Type: "read", Account: s.account, Conversation: convID,
+	s.fire(Event{Type: "read", Account: s.account, Conversation: convID,
 		LastReadMessage: msgID, Unread: false})
 	if conv, err := s.getConversation(convID); err == nil {
 		if mapped, meta, err := s.mapConversation(conv); err == nil {
 			s.mu.Lock()
 			s.metas[convID] = meta
 			s.mu.Unlock()
-			s.emit(Event{Type: "conversations", Account: s.account,
+			s.fire(Event{Type: "conversations", Account: s.account,
 				Conversations: []Conversation{mapped}})
 		}
 	}
@@ -602,13 +604,13 @@ func (s *Session) Typing(convID string) {
 	}
 	s.mu.Unlock()
 	if client == nil {
-		s.emit(Event{Type: "error", Account: s.account, Message: "not connected"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "not connected"})
 		return
 	}
 	ctx, cancel := timeoutCtx()
 	defer cancel()
 	if err := client.SetTyping(ctx, convID, s.simPayload(outgoing)); err != nil {
-		s.emit(Event{Type: "error", Account: s.account, Message: "typing ping failed"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "typing ping failed"})
 	}
 }
 
@@ -689,7 +691,7 @@ func (s *Session) Open(requestID string, addresses []string) {
 		s.mu.Lock()
 		s.metas[conv.GetConversationID()] = meta
 		s.mu.Unlock()
-		s.emit(Event{Type: "conversations", Account: s.account,
+		s.fire(Event{Type: "conversations", Account: s.account,
 			Conversations: []Conversation{mapped}})
 		s.emitWindow(conv.GetConversationID(), messageWindow, nil, false, true)
 	}
@@ -698,7 +700,9 @@ func (s *Session) Open(requestID string, addresses []string) {
 // Logout revokes remotely, then deletes local state only after the
 // revoke succeeds. A failed revoke keeps the session and reports it:
 // access may still exist server-side, and saying otherwise would lie.
-func (s *Session) Logout() {
+// It reports whether the session was actually torn down so the caller
+// only forgets the session on success.
+func (s *Session) Logout() bool {
 	s.mu.Lock()
 	if s.pairCancel != nil {
 		s.pairCancel()
@@ -710,15 +714,15 @@ func (s *Session) Logout() {
 		ctx, cancel := timeoutCtx()
 		defer cancel()
 		if err := client.Unpair(ctx); err != nil {
-			s.emit(Event{Type: "error", Account: s.account,
+			s.fire(Event{Type: "error", Account: s.account,
 				Message: "remote revoke failed, session kept"})
-			return
+			return false
 		}
 		client.Disconnect()
 	}
 	if err := s.store.DeleteAuth(s.account); err != nil {
-		s.emit(Event{Type: "error", Account: s.account, Message: "deleting session failed"})
-		return
+		s.fire(Event{Type: "error", Account: s.account, Message: "deleting session failed"})
+		return false
 	}
 	s.mu.Lock()
 	s.client = nil
@@ -726,7 +730,8 @@ func (s *Session) Logout() {
 	s.connected = false
 	s.authenticated = false
 	s.mu.Unlock()
-	s.emit(Event{Type: "account_removed", Account: s.account})
+	s.fire(Event{Type: "account_removed", Account: s.account})
+	return true
 }
 
 // Close stops background loops. It does not delete stored sessions:
@@ -737,6 +742,10 @@ func (s *Session) Close() {
 	if s.pairCancel != nil {
 		s.pairCancel()
 		s.pairCancel = nil
+	}
+	if s.connectCancel != nil {
+		s.connectCancel()
+		s.connectCancel = nil
 	}
 	client := s.client
 	s.mu.Unlock()

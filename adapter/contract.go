@@ -42,28 +42,33 @@ type Command struct {
 
 // Event is one JSON line to the daemon (stdout).
 type Event struct {
-	Type            string         `json:"type"`
-	HelperProtocol  int            `json:"helper_protocol,omitempty"`
-	Name            string         `json:"name,omitempty"`
-	Account         string         `json:"account,omitempty"`
-	Label           string         `json:"label,omitempty"`
-	Connected       bool           `json:"connected,omitempty"`
-	Authenticated   bool           `json:"authenticated,omitempty"`
-	Prompt          string         `json:"prompt,omitempty"`
-	Conversations   []Conversation `json:"conversations,omitempty"`
-	Full            bool           `json:"full,omitempty"`
-	Conversation    string         `json:"conversation,omitempty"`
-	Messages        []Message      `json:"messages,omitempty"`
-	CursorNext      string         `json:"cursor_next,omitempty"`
-	PageComplete    bool           `json:"page_complete,omitempty"`
-	Message         string         `json:"message,omitempty"`
-	Status          string         `json:"status,omitempty"`
-	Participants    []string       `json:"participants,omitempty"`
-	LastReadMessage string         `json:"last_read_message,omitempty"`
-	Unread          bool           `json:"unread,omitempty"`
-	RequestID       string         `json:"request_id,omitempty"`
-	OK              bool           `json:"ok,omitempty"`
-	Error           string         `json:"error,omitempty"`
+	Type           string         `json:"type"`
+	HelperProtocol int            `json:"helper_protocol,omitempty"`
+	Name           string         `json:"name,omitempty"`
+	Account        string         `json:"account,omitempty"`
+	Label          string         `json:"label,omitempty"`
+	Connected      bool           `json:"connected,omitempty"`
+	Authenticated  bool           `json:"authenticated,omitempty"`
+	Prompt         string         `json:"prompt,omitempty"`
+	Conversations  []Conversation `json:"conversations,omitempty"`
+	Full           bool           `json:"full,omitempty"`
+	// Generation groups the chunks of one multi-chunk sync. Only the
+	// last chunk of a generation carries full=true; the daemon
+	// reconciles once the generation closes instead of per chunk.
+	// Zero means ungrouped (single-chunk or live events).
+	Generation      uint64    `json:"generation,omitempty"`
+	Conversation    string    `json:"conversation,omitempty"`
+	Messages        []Message `json:"messages,omitempty"`
+	CursorNext      string    `json:"cursor_next,omitempty"`
+	PageComplete    bool      `json:"page_complete,omitempty"`
+	Message         string    `json:"message,omitempty"`
+	Status          string    `json:"status,omitempty"`
+	Participants    []string  `json:"participants,omitempty"`
+	LastReadMessage string    `json:"last_read_message,omitempty"`
+	Unread          bool      `json:"unread,omitempty"`
+	RequestID       string    `json:"request_id,omitempty"`
+	OK              bool      `json:"ok,omitempty"`
+	Error           string    `json:"error,omitempty"`
 }
 
 // MarshalJSON emits exactly the Handover helper IPC v1 shapes. Arrays
@@ -97,6 +102,9 @@ func (e Event) MarshalJSON() ([]byte, error) {
 		out["account"] = e.Account
 		out["conversations"] = nonNilConversations(e.Conversations)
 		out["full"] = e.Full
+		if e.Generation != 0 {
+			out["generation"] = e.Generation
+		}
 	case "conversation_removed":
 		out["account"] = e.Account
 		out["conversation"] = e.Conversation
@@ -107,6 +115,9 @@ func (e Event) MarshalJSON() ([]byte, error) {
 		str("cursor_next", e.CursorNext)
 		out["page_complete"] = e.PageComplete
 		out["full"] = e.Full
+		if e.Generation != 0 {
+			out["generation"] = e.Generation
+		}
 	case "message_removed":
 		out["account"] = e.Account
 		out["conversation"] = e.Conversation

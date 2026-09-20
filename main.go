@@ -164,8 +164,12 @@ func (h *hub) dispatch(cmd adapter.Command) {
 		if !validAccount(cmd.Account) {
 			return
 		}
-		h.session(cmd.Account).Logout()
-		h.forget(cmd.Account)
+		// Only forget the session when the revoke actually tore it
+		// down. Forgetting after a failed revoke would disconnect a
+		// live session while the daemon believes access ended.
+		if h.session(cmd.Account).Logout() {
+			h.forget(cmd.Account)
+		}
 	case "list_conversations", "sync":
 		if !validAccount(cmd.Account) {
 			return
@@ -246,11 +250,15 @@ func (h *hub) restore() {
 }
 
 func validAccount(account string) bool {
+	// Same rule as the storage gate (accountFile): anything that
+	// cannot become a session file name is rejected at the command
+	// gate, so no account is accepted by one layer and rejected by
+	// the other.
 	if account == "" || len(account) > 128 {
 		return false
 	}
 	for _, r := range account {
-		if r == '/' || r == '\\' || r == 0 || r < 0x20 {
+		if r == '/' || r == '\\' || r == '.' || r == 0 || r < 0x20 {
 			return false
 		}
 	}

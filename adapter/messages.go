@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
@@ -180,7 +182,8 @@ func (s *Session) downloadPart(msgID, actionID string, part *gmproto.MediaConten
 	return "", fmt.Errorf("object pending re-delivery")
 }
 
-// fullSizeRequests deduplicates full-size triggers per part.
+// fullSizeRequests deduplicates full-size triggers per part. Entries
+// expire so a long-running session cannot accumulate them forever.
 func (s *Session) requestFullSize(client clientMedia, msgID, actionID string) {
 	if actionID == "" {
 		return
@@ -188,13 +191,19 @@ func (s *Session) requestFullSize(client clientMedia, msgID, actionID string) {
 	key := msgID + "\x00" + actionID
 	s.mu.Lock()
 	if s.fullReq == nil {
-		s.fullReq = map[string]bool{}
+		s.fullReq = map[string]time.Time{}
 	}
-	if s.fullReq[key] {
+	cutoff := time.Now().Add(-fullReqTTL)
+	for known, at := range s.fullReq {
+		if at.Before(cutoff) {
+			delete(s.fullReq, known)
+		}
+	}
+	if _, ok := s.fullReq[key]; ok {
 		s.mu.Unlock()
 		return
 	}
-	s.fullReq[key] = true
+	s.fullReq[key] = time.Now()
 	s.mu.Unlock()
 	ctx, cancel := timeoutCtx()
 	defer cancel()
@@ -202,6 +211,11 @@ func (s *Session) requestFullSize(client clientMedia, msgID, actionID string) {
 		s.log.Debug().Str("message", msgID).Msg("full-size re-request failed")
 	}
 }
+
+// fullReqTTL bounds full-size re-request dedupe: long enough to
+// collapse relay re-emissions of one part, short enough that a
+// long-running session cannot accumulate entries forever.
+const fullReqTTL = time.Hour
 
 // sanitizeName reduces a relay-supplied name to one safe basename with
 // the same rules as the Handover daemon: no separators, dots, NUL, or
@@ -220,8 +234,15 @@ func sanitizeName(name string) (string, bool) {
 			return "", false
 		}
 	}
+	// Truncate by runes, not bytes: cutting a multi-byte rune in half
+	// produces invalid UTF-8 that cannot round-trip through JSON.
 	for len(base) > 255 {
-		base = base[:len(base)-1]
+		_, size := utf8.DecodeLastRuneInString(base)
+		if size <= 1 {
+			base = base[:len(base)-1]
+		} else {
+			base = base[:len(base)-size]
+		}
 	}
 	if base == "" || base == "." || base == ".." {
 		return "", false

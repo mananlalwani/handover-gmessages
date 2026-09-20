@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
 
@@ -85,50 +86,98 @@ func (s *Session) SendResult(requestID string, ok bool, errMsg string) {
 	s.result(requestID, ok, errMsg)
 }
 
-// fullSync re-emits authoritative state: the thread list (full,
-// so the daemon reconciles), one window per thread, and thread-level
-// unread flags. Failures are per-thread; one bad thread never aborts
-// the sync.
+// listPage fetches one conversation page after the given cursor.
+func (s *Session) listPage(client *libgm.Client, cursor *gmproto.Cursor) (*gmproto.ListConversationsResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+	defer cancel()
+	return client.ListConversations(ctx, &gmproto.ListConversationsRequest{
+		Count:  conversationPage,
+		Folder: gmproto.ListConversationsRequest_INBOX,
+		Cursor: cursor,
+	})
+}
+
+// maxSyncPages bounds one sync so a pathological library cannot page
+// forever. The cap is logged when hit; the next sync resumes from the
+// first page, so capped threads converge over successive syncs.
+const maxSyncPages = 10
+
+// listAllConversations pages the whole inbox. A single page is never
+// treated as authoritative for a large library: accounts with more
+// threads than one page would otherwise lose older conversations from
+// normalized state on every sync.
+func (s *Session) listAllConversations(client *libgm.Client) ([]*gmproto.Conversation, error) {
+	var all []*gmproto.Conversation
+	seen := map[string]bool{}
+	var cursor *gmproto.Cursor
+	for page := 0; page < maxSyncPages; page++ {
+		resp, err := s.listPage(client, cursor)
+		if err != nil {
+			// Match libgm's recovery ladder: a phone that stopped
+			// answering needs its push/active session re-armed before
+			// retrying RPCs. Only the first page retries; later pages
+			// fail the sync instead of mixing stale and fresh windows.
+			if page > 0 {
+				return nil, err
+			}
+			if activeErr := func() error {
+				ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+				defer cancel()
+				return client.SetActiveSession(ctx)
+			}(); activeErr == nil {
+				resp, err = s.listPage(client, cursor)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+		convs := resp.GetConversations()
+		for _, conv := range convs {
+			id := conv.GetConversationID()
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			all = append(all, conv)
+		}
+		next := resp.GetCursor()
+		if len(convs) < conversationPage || next == nil || next.GetLastItemID() == "" {
+			return all, nil
+		}
+		cursor = next
+	}
+	s.log.Warn().Int("threads", len(all)).Msg("conversation sync hit the page cap")
+	return all, nil
+}
+
+// fullSync re-emits authoritative state: the paged thread list (the
+// closing generation is full, so the daemon reconciles once), and
+// thread-level unread flags. Failures are per-thread; one bad thread
+// never aborts the sync.
 func (s *Session) fullSync(reason string) bool {
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
+	if !s.alive() {
+		return false
+	}
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
 	if client == nil {
 		return false
 	}
-	list := func() (*gmproto.ListConversationsResponse, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
-		defer cancel()
-		return client.ListConversations(ctx, &gmproto.ListConversationsRequest{
-			Count:  conversationPage,
-			Folder: gmproto.ListConversationsRequest_INBOX,
-		})
-	}
-	resp, err := list()
-	if err != nil {
-		// Match libgm's recovery ladder: a phone that stopped answering
-		// needs its push/active session re-armed before retrying RPCs.
-		if activeErr := func() error {
-			ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
-			defer cancel()
-			return client.SetActiveSession(ctx)
-		}(); activeErr == nil {
-			resp, err = list()
-		}
-	}
+	convs, err := s.listAllConversations(client)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("listing conversations failed")
-		s.emit(Event{Type: "error", Account: s.account, Message: "conversation sync failed"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "conversation sync failed"})
 		return false
 	}
 	// Google returns the inbox as a broad thread library, and ordering is
 	// not stable across sync responses. Present the same useful ordering as
 	// a messaging client: most recently active conversations first.
-	sort.SliceStable(resp.Conversations, func(i, j int) bool {
-		return resp.Conversations[i].GetLastMessageTimestamp() >
-			resp.Conversations[j].GetLastMessageTimestamp()
+	sort.SliceStable(convs, func(i, j int) bool {
+		return convs[i].GetLastMessageTimestamp() >
+			convs[j].GetLastMessageTimestamp()
 	})
 	var threads []Conversation
 	type threadResult struct {
@@ -137,9 +186,9 @@ func (s *Session) fullSync(reason string) bool {
 		unread bool
 		ok     bool
 	}
-	results := make([]threadResult, len(resp.GetConversations()))
+	results := make([]threadResult, len(convs))
 	var wg sync.WaitGroup
-	for i, conv := range resp.GetConversations() {
+	for i, conv := range convs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -174,7 +223,7 @@ func (s *Session) fullSync(reason string) bool {
 			threads = append(threads, result.thread)
 		}
 	}
-	s.emitConversations(threads)
+	s.emitConversations(threads, s.nextGeneration())
 	// Do not fetch a message window for every thread during account sync.
 	// A large library can contain hundreds of conversations, and issuing
 	// hundreds of concurrent phone RPCs starves the relay and makes sends
@@ -187,7 +236,7 @@ func (s *Session) fullSync(reason string) bool {
 		}
 	}
 	for _, thread := range threads {
-		s.emit(Event{Type: "read", Account: s.account, Conversation: thread.LocalID,
+		s.fire(Event{Type: "read", Account: s.account, Conversation: thread.LocalID,
 			Unread: unreads[thread.LocalID]})
 	}
 	if err := s.store.SaveAuth(s.account, s.auth); err != nil {
@@ -205,13 +254,26 @@ func (s *Session) threadUnread(convID string) bool {
 	return conv.GetUnread()
 }
 
-// emitConversations sends the thread list in size-bounded chunks. The
-// first chunk is authoritative so the daemon reconciles; later chunks
-// merge. Small libraries keep the single full event; large ones converge
-// to the same set with transient remove/re-add churn on re-syncs.
-func (s *Session) emitConversations(threads []Conversation) {
+// nextGeneration mints a chunk-group id for one multi-chunk sync.
+// Generations start at 1; zero on the wire means ungrouped.
+func (s *Session) nextGeneration() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.generation++
+	if s.generation == 0 {
+		s.generation = 1
+	}
+	return s.generation
+}
+
+// emitConversations sends the thread list in size-bounded chunks that
+// share one generation. Only the closing chunk is authoritative, so the
+// daemon reconciles once against the whole list instead of removing
+// and re-adding threads that arrive in later chunks. A list that fits
+// in one chunk keeps the single full event.
+func (s *Session) emitConversations(threads []Conversation, generation uint64) {
 	if len(threads) == 0 {
-		s.emit(Event{Type: "conversations", Account: s.account,
+		s.fire(Event{Type: "conversations", Account: s.account,
 			Conversations: []Conversation{}, Full: true})
 		return
 	}
@@ -228,17 +290,22 @@ func (s *Session) emitConversations(threads []Conversation) {
 	}
 	chunks = append(chunks, cur)
 	for i, chunk := range chunks {
-		s.emit(Event{Type: "conversations", Account: s.account,
-			Conversations: chunk, Full: i == 0})
+		last := i == len(chunks)-1
+		evt := Event{Type: "conversations", Account: s.account,
+			Conversations: chunk, Full: last}
+		if len(chunks) > 1 {
+			evt.Generation = generation
+		}
+		s.fire(evt)
 	}
 }
 
-// emitMessages sends one window in size-bounded chunks with the same
-// first-authoritative-then-merge pattern. cursorNext rides the last
-// chunk only.
+// emitMessages sends one window in size-bounded chunks. The closing
+// chunk carries the authority flag and the cursor, so multi-chunk
+// windows reconcile once instead of dropping later chunks' messages.
 func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorNext string) {
 	if len(msgs) == 0 {
-		s.emit(Event{Type: "messages", Account: s.account, Conversation: convID,
+		s.fire(Event{Type: "messages", Account: s.account, Conversation: convID,
 			Messages: []Message{}, Full: full, PageComplete: true})
 		return
 	}
@@ -254,14 +321,19 @@ func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorN
 		cur = append(cur, msg)
 	}
 	chunks = append(chunks, cur)
+	var generation uint64
+	if full && len(chunks) > 1 {
+		generation = s.nextGeneration()
+	}
 	for i, chunk := range chunks {
+		last := i == len(chunks)-1
 		evt := Event{Type: "messages", Account: s.account, Conversation: convID,
-			Messages: chunk, Full: full && i == 0}
-		if i == len(chunks)-1 {
+			Messages: chunk, Full: full && last, Generation: generation}
+		if last {
 			evt.CursorNext = cursorNext
 			evt.PageComplete = true
 		}
-		s.emit(evt)
+		s.fire(evt)
 	}
 }
 
@@ -290,7 +362,7 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, 
 	client := s.client
 	s.mu.Unlock()
 	if client == nil {
-		s.emit(Event{Type: "error", Account: s.account, Message: "not connected"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "not connected"})
 		return
 	}
 	var rpcCursor *gmproto.Cursor
@@ -304,7 +376,7 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, 
 			id = *cursor
 			ts = s.cachedTS(convID, id)
 			if id == "" || ts == 0 {
-				s.emit(Event{Type: "error", Account: s.account, Message: "unknown history cursor"})
+				s.fire(Event{Type: "error", Account: s.account, Message: "unknown history cursor"})
 				return
 			}
 			ts /= 1000
@@ -316,14 +388,14 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, 
 	resp, err := client.FetchMessages(ctx, convID, int64(limit), rpcCursor)
 	if err != nil {
 		s.log.Warn().Str("conversation", convID).Msg("fetching history failed")
-		s.emit(Event{Type: "error", Account: s.account, Message: "history fetch failed"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "history fetch failed"})
 		return
 	}
 	var out []Message
 	for _, msg := range resp.GetMessages() {
 		mapped, removed := s.mapMessage(convID, msg, download)
 		if removed != "" {
-			s.emit(Event{Type: "message_removed", Account: s.account,
+			s.fire(Event{Type: "message_removed", Account: s.account,
 				Conversation: convID, Message: removed})
 			continue
 		}
@@ -361,21 +433,21 @@ func (s *Session) handleMessage(msg *gmproto.Message, isOld bool) {
 	}
 	if isDeletion(status) {
 		if msg.GetMessageID() != "" {
-			s.emit(Event{Type: "message_removed", Account: s.account,
+			s.fire(Event{Type: "message_removed", Account: s.account,
 				Conversation: convID, Message: msg.GetMessageID()})
 		}
 		return
 	}
 	mapped, removed := s.mapMessage(convID, msg, true)
 	if removed != "" {
-		s.emit(Event{Type: "message_removed", Account: s.account,
+		s.fire(Event{Type: "message_removed", Account: s.account,
 			Conversation: convID, Message: removed})
 		return
 	}
 	if mapped == nil {
 		return
 	}
-	s.emit(Event{Type: "messages", Account: s.account, Conversation: convID,
+	s.fire(Event{Type: "messages", Account: s.account, Conversation: convID,
 		Messages: []Message{*mapped}})
 	// Remote echoes are authoritative even when the relay's sender field
 	// uses an alias not present in selfIDs. Correlate pending sends before
@@ -383,7 +455,7 @@ func (s *Session) handleMessage(msg *gmproto.Message, isOld bool) {
 	s.checkPending(msg)
 	if s.isSelfSender(convID, msg) {
 		if token, ok := mapStatus(status); ok {
-			s.emit(Event{Type: "status", Account: s.account,
+			s.fire(Event{Type: "status", Account: s.account,
 				Conversation: convID, Message: msg.GetMessageID(), Status: token})
 		}
 	}
@@ -397,14 +469,23 @@ func (s *Session) checkPending(msg *gmproto.Message) {
 	s.mu.Lock()
 	pending, ok := s.pending[msg.GetTmpID()]
 	if ok {
-		delete(s.pending, msg.GetTmpID())
+		if time.Since(pending.at) > pendingTTL {
+			// The relay answered after the correlation expired.
+			// The send already timed out from the daemon's view;
+			// fall through to the self-sender path instead of
+			// attributing a stale request.
+			delete(s.pending, msg.GetTmpID())
+			ok = false
+		} else {
+			delete(s.pending, msg.GetTmpID())
+		}
 	}
 	s.mu.Unlock()
 	if !ok {
 		return
 	}
 	if token, ok := mapStatus(msg.GetMessageStatus().GetStatus()); ok {
-		s.emit(Event{Type: "status", Account: s.account,
+		s.fire(Event{Type: "status", Account: s.account,
 			Conversation: pending.convID, Message: msg.GetMessageID(), Status: token})
 	}
 }
@@ -450,4 +531,20 @@ func (s *Session) rememberMessage(convID string, msg *gmproto.Message, self bool
 		entries = entries[1:]
 	}
 	s.cache[convID] = entries
+	sweepCaches(s.cache)
+}
+
+// maxCachedConvs bounds the message cache across conversations. Window
+// contents stay exact; only the number of retained conversation windows
+// is capped. Eviction picks an arbitrary window, which is safe because
+// the cache only backs cursor recovery and dedupe, never authority.
+const maxCachedConvs = 1024
+
+func sweepCaches(cache map[string][]cachedMessage) {
+	for len(cache) > maxCachedConvs {
+		for convID := range cache {
+			delete(cache, convID)
+			break
+		}
+	}
 }

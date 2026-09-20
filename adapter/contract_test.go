@@ -200,7 +200,7 @@ func TestChunkedEmissionStaysUnderBound(t *testing.T) {
 			Capabilities: rcsCaps,
 		})
 	}
-	sess.emitConversations(threads)
+	sess.emitConversations(threads, 7)
 	if len(got) < 2 {
 		t.Fatalf("400 threads must chunk, got %d events", len(got))
 	}
@@ -210,11 +210,14 @@ func TestChunkedEmissionStaysUnderBound(t *testing.T) {
 		if len(raw) > maxEventBytes {
 			t.Errorf("chunk %d is %d bytes", i, len(raw))
 		}
-		if i == 0 && !evt.Full {
-			t.Error("first chunk must be authoritative")
+		if evt.Generation != 7 {
+			t.Errorf("chunk %d must share generation 7, got %d", i, evt.Generation)
 		}
-		if i > 0 && evt.Full {
-			t.Error("later chunks must merge")
+		if i < len(got)-1 && evt.Full {
+			t.Errorf("chunk %d must merge, only the closing chunk is authoritative", i)
+		}
+		if i == len(got)-1 && !evt.Full {
+			t.Error("closing chunk must be authoritative")
 		}
 		total += len(evt.Conversations)
 	}
@@ -246,8 +249,13 @@ func TestChunkedEmissionStaysUnderBound(t *testing.T) {
 			t.Errorf("only final chunk completes the page: chunk %d complete=%v", i, evt.PageComplete)
 		}
 	}
-	if !got[0].Full || got[1].Full {
-		t.Error("only the first chunk is authoritative")
+	if got[len(got)-1].Full == false {
+		t.Error("only the closing chunk is authoritative")
+	}
+	for i, evt := range got[:len(got)-1] {
+		if evt.Full {
+			t.Errorf("chunk %d must merge", i)
+		}
 	}
 }
 

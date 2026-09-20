@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -56,11 +57,24 @@ type Session struct {
 	pending    map[string]pendingSend
 	pairCancel context.CancelFunc
 	ps         *libgm.PairingSession
-	fullReq    map[string]bool
+	fullReq    map[string]time.Time
 
 	events    chan any
 	closed    chan struct{}
 	closeOnce sync.Once
+
+	// loopOnce guards the relay event consumer: login, restore, and
+	// reconnect all funnel through one goroutine so a second login
+	// cannot start a second consumer over the same queue.
+	loopOnce sync.Once
+	// connectCancel stops the previous reconnect loop before a new
+	// one starts, so re-login never leaves two loops racing.
+	connectCancel context.CancelFunc
+	// generation groups multi-chunk sync emissions. See sync.go.
+	generation uint64
+	// resyncing serializes queue-overflow recovery: one catch-up
+	// runs at a time no matter how many overflows fire.
+	resyncing atomic.Bool
 
 	connected     bool
 	authenticated bool
@@ -76,6 +90,23 @@ type cachedMessage struct {
 type pendingSend struct {
 	requestID string
 	convID    string
+	// at bounds the entry's life: a send the relay never echoes must
+	// not pin correlation state for the life of the process.
+	at time.Time
+}
+
+// pendingTTL covers the slowest relay round-trip (slowTimeout) with
+// margin. Older entries are dropped by the sweep below.
+const pendingTTL = 10 * time.Minute
+
+// sweepPending drops correlation state the relay never resolved.
+func (s *Session) sweepPending() {
+	cutoff := time.Now().Add(-pendingTTL)
+	for txn, send := range s.pending {
+		if send.at.Before(cutoff) {
+			delete(s.pending, txn)
+		}
+	}
 }
 
 // requiredCookies mirrors the upstream Gaia login documentation. Values
@@ -182,8 +213,64 @@ func (s *Session) buildClient(auth *libgm.AuthData) {
 			case s.events <- evt:
 			default:
 			}
+			// A dropped relay event is a gap the daemon cannot see:
+			// message, delete, and auth signals may now be lost.
+			// Schedule one serialized catch-up so the loss heals
+			// instead of lingering.
+			s.requestResync()
 		}
 	})
+}
+
+// requestResync schedules one background catch-up after event loss.
+// Concurrent overflows collapse into the single running sync.
+func (s *Session) requestResync() {
+	if !s.resyncing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer s.resyncing.Store(false)
+		s.fullSync("event-queue-overflow")
+	}()
+}
+
+// alive reports whether the session still accepts work. Events fired
+// after Close are dropped so a late reconnect cannot emit state for a
+// disposed session.
+func (s *Session) alive() bool {
+	select {
+	case <-s.closed:
+		return false
+	default:
+		return true
+	}
+}
+
+// fire emits unless the session was closed.
+func (s *Session) fire(evt Event) {
+	if !s.alive() {
+		return
+	}
+	s.emit(evt)
+}
+
+// runEventLoop starts the single relay event consumer.
+func (s *Session) runEventLoop() {
+	s.loopOnce.Do(func() { go s.eventLoop() })
+}
+
+// runConnectLoop starts a reconnect loop, stopping the previous one
+// first so re-login never leaves two loops racing over one account.
+func (s *Session) runConnectLoop(ctx context.Context) {
+	s.mu.Lock()
+	if s.connectCancel != nil {
+		s.connectCancel()
+		s.connectCancel = nil
+	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	s.connectCancel = cancel
+	s.mu.Unlock()
+	go s.connectLoop(loopCtx)
 }
 
 // Restore loads a persisted session and connects in the background.
@@ -202,10 +289,10 @@ func (s *Session) Restore(ctx context.Context) error {
 	s.authenticated = auth.Mobile != nil
 	s.buildClient(auth)
 	s.mu.Unlock()
-	s.emit(Event{Type: "account", Account: s.account, Label: "Google Messages",
+	s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
 		Connected: false, Authenticated: s.authenticated})
-	go s.eventLoop()
-	go s.connectLoop(ctx)
+	s.runEventLoop()
+	s.runConnectLoop(ctx)
 	return nil
 }
 
@@ -227,9 +314,9 @@ func (s *Session) connectLoop(ctx context.Context) {
 			s.authenticated = false
 			s.connected = false
 			s.mu.Unlock()
-			s.emit(Event{Type: "account", Account: s.account, Label: "Google Messages",
+			s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
 				Connected: false, Authenticated: false})
-			s.emit(Event{Type: "error", Account: s.account, Message: "session expired, re-pair required"})
+			s.fire(Event{Type: "error", Account: s.account, Message: "session expired, re-pair required"})
 			return
 		} else {
 			s.log.Warn().Err(err).Dur("backoff", backoff).Msg("relay connect failed, retrying")
@@ -270,7 +357,7 @@ func (s *Session) connectOnce(ctx context.Context) error {
 	s.connected = true
 	s.authenticated = true
 	s.mu.Unlock()
-	s.emit(Event{Type: "account", Account: s.account, Label: "Google Messages",
+	s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
 		Connected: true, Authenticated: true})
 	if err := s.store.SaveAuth(s.account, s.auth); err != nil {
 		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
@@ -332,7 +419,7 @@ func (s *Session) handleRelayEvent(evt any) {
 		s.mu.Lock()
 		s.metas[conv.GetConversationID()] = meta
 		s.mu.Unlock()
-		s.emit(Event{Type: "conversations", Account: s.account,
+		s.fire(Event{Type: "conversations", Account: s.account,
 			Conversations: []Conversation{mapped}})
 	case *libgm.WrappedMessage:
 		s.handleMessage(evt.Message, evt.IsOld)
@@ -341,7 +428,7 @@ func (s *Session) handleRelayEvent(evt any) {
 		if evt.GetType() == gmproto.TypingTypes_STARTED_TYPING && evt.GetUser().GetNumber() != "" {
 			participants = append(participants, evt.GetUser().GetNumber())
 		}
-		s.emit(Event{Type: "typing", Account: s.account,
+		s.fire(Event{Type: "typing", Account: s.account,
 			Conversation: evt.GetConversationID(), Participants: participants})
 	case *gmproto.Settings:
 		changed := false
@@ -367,9 +454,9 @@ func (s *Session) handleRelayEvent(evt any) {
 		s.connected = false
 		s.authenticated = false
 		s.mu.Unlock()
-		s.emit(Event{Type: "account", Account: s.account, Label: "Google Messages",
+		s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
 			Connected: false, Authenticated: false})
-		s.emit(Event{Type: "error", Account: s.account, Message: "session logged out by Google, re-pair required"})
+		s.fire(Event{Type: "error", Account: s.account, Message: "session logged out by Google, re-pair required"})
 	case *events.ListenFatalError:
 		s.log.Warn().Err(evt.Error).Msg("relay fatal error")
 		if isFatalAuth(evt.Error) {
@@ -377,11 +464,11 @@ func (s *Session) handleRelayEvent(evt any) {
 			s.connected = false
 			s.authenticated = false
 			s.mu.Unlock()
-			s.emit(Event{Type: "account", Account: s.account, Label: "Google Messages",
+			s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
 				Connected: false, Authenticated: false})
-			s.emit(Event{Type: "error", Account: s.account, Message: "session expired, re-pair required"})
+			s.fire(Event{Type: "error", Account: s.account, Message: "session expired, re-pair required"})
 		} else {
-			s.emit(Event{Type: "error", Account: s.account, Message: "relay connection lost, retrying"})
+			s.fire(Event{Type: "error", Account: s.account, Message: "relay connection lost, retrying"})
 		}
 	case *events.AccountChange:
 		s.log.Debug().Msg("relay account change ignored")

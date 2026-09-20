@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unicode/utf8"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 )
@@ -99,5 +100,26 @@ func TestSanitizeName(t *testing.T) {
 	}
 	if got, ok := sanitizeName(long); !ok || len(got) != 255 {
 		t.Errorf("long name = %d,%v", len(got), ok)
+	}
+}
+
+func TestSanitizeNameKeepsUTF8Intact(t *testing.T) {
+	long := ""
+	for len(long) < 300 {
+		long += "✓"
+	}
+	got, ok := sanitizeName(long + ".jpg")
+	if !ok {
+		t.Fatal("unicode name must be accepted")
+	}
+	if len(got) > 255 {
+		t.Errorf("truncated name is %d bytes", len(got))
+	}
+	for i := 0; i < len(got); {
+		_, size := utf8.DecodeRuneInString(got[i:])
+		if size <= 1 && got[i] >= 0x80 {
+			t.Fatalf("name splits a rune: %q", got)
+		}
+		i += size
 	}
 }
