@@ -200,7 +200,7 @@ func TestChunkedEmissionStaysUnderBound(t *testing.T) {
 			Capabilities: rcsCaps,
 		})
 	}
-	sess.emitConversations(threads, 7)
+	sess.emitConversations(threads, 7, true)
 	if len(got) < 2 {
 		t.Fatalf("400 threads must chunk, got %d events", len(got))
 	}
@@ -223,6 +223,23 @@ func TestChunkedEmissionStaysUnderBound(t *testing.T) {
 	}
 	if total != len(threads) {
 		t.Errorf("chunks cover %d of %d threads", total, len(threads))
+	}
+
+	// An incomplete sync merges without authority: no chunk may
+	// carry full or a generation, so the daemon cannot mistake the
+	// subset for the whole library.
+	got = nil
+	sess.emitConversations(threads[:10], 0, false)
+	if len(got) == 0 {
+		t.Fatal("merge-only emission must still emit")
+	}
+	for i, evt := range got {
+		if evt.Full {
+			t.Errorf("chunk %d of an incomplete sync must merge", i)
+		}
+		if evt.Generation != 0 {
+			t.Errorf("chunk %d of an incomplete sync must be ungrouped", i)
+		}
 	}
 
 	got = nil

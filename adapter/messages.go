@@ -276,6 +276,7 @@ func (s *Session) writeStaged(name, mime string, data []byte) (string, error) {
 		os.Remove(path)
 		return "", err
 	}
+	s.store.maybeSweep()
 	return path, nil
 }
 
@@ -312,6 +313,7 @@ func (s *Session) streamStaged(client clientMedia, mediaID string, key []byte, n
 		os.Remove(path)
 		return "", fmt.Errorf("attachment too large")
 	}
+	s.store.maybeSweep()
 	return path, nil
 }
 

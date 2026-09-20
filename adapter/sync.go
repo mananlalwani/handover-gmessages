@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -111,7 +112,7 @@ const recentWindowRefresh = 10
 // treated as authoritative for a large library: accounts with more
 // threads than one page would otherwise lose older conversations from
 // normalized state on every sync.
-func (s *Session) listAllConversations(client *libgm.Client) ([]*gmproto.Conversation, error) {
+func (s *Session) listAllConversations(client *libgm.Client) ([]*gmproto.Conversation, bool, error) {
 	var all []*gmproto.Conversation
 	seen := map[string]bool{}
 	var cursor *gmproto.Cursor
@@ -123,7 +124,7 @@ func (s *Session) listAllConversations(client *libgm.Client) ([]*gmproto.Convers
 			// retrying RPCs. Only the first page retries; later pages
 			// fail the sync instead of mixing stale and fresh windows.
 			if page > 0 {
-				return nil, err
+				return nil, false, err
 			}
 			if activeErr := func() error {
 				ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
@@ -133,7 +134,7 @@ func (s *Session) listAllConversations(client *libgm.Client) ([]*gmproto.Convers
 				resp, err = s.listPage(client, cursor)
 			}
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 		convs := resp.GetConversations()
@@ -147,12 +148,12 @@ func (s *Session) listAllConversations(client *libgm.Client) ([]*gmproto.Convers
 		}
 		next := resp.GetCursor()
 		if len(convs) < conversationPage || next == nil || next.GetLastItemID() == "" {
-			return all, nil
+			return all, false, nil
 		}
 		cursor = next
 	}
 	s.log.Warn().Int("threads", len(all)).Msg("conversation sync hit the page cap")
-	return all, nil
+	return all, true, nil
 }
 
 // fullSync re-emits authoritative state: the paged thread list (the
@@ -165,13 +166,14 @@ func (s *Session) fullSync(reason string) bool {
 	if !s.alive() {
 		return false
 	}
+	generation := s.currentGeneration()
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
 	if client == nil {
 		return false
 	}
-	convs, err := s.listAllConversations(client)
+	convs, capped, err := s.listAllConversations(client)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("listing conversations failed")
 		s.fire(Event{Type: "error", Account: s.account, Message: "conversation sync failed"})
@@ -192,50 +194,66 @@ func (s *Session) fullSync(reason string) bool {
 		ok     bool
 	}
 	results := make([]threadResult, len(convs))
-	// Bounded worker pool, not one goroutine per thread: a large
-	// library plus per-thread fallback RPCs would otherwise recreate
-	// the relay starvation this design avoids. Mapping is CPU-light;
-	// the semaphore guards the fallback phone round-trips.
-	sem := make(chan struct{}, syncWorkers)
+	// Fixed worker pool: one goroutine per thread would park up to
+	// two thousand goroutines on the semaphore for a large library.
+	// Eight workers pull indices; the pool also bounds the fallback
+	// phone round-trips that starve the relay.
+	var skipped atomic.Int32
+	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for i, conv := range convs {
+	for range syncWorkers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			// ListConversations already returns the authoritative conversation
-			// record. Upstream maps that record directly; doing a GetConversation
-			// RPC for every thread fans one sync into dozens of phone requests
-			// and starves sends/history.
-			mapped, meta, err := s.mapConversation(conv)
-			if err != nil && len(conv.GetParticipants()) == 0 {
-				// Older relay responses may omit participants from list rows.
-				// Keep the compatibility fallback, but only for those rows.
-				full, fetchErr := s.getConversation(conv.GetConversationID())
-				if fetchErr != nil {
-					s.log.Warn().Str("conversation", conv.GetConversationID()).Msg("skipping thread")
-					return
+			for i := range jobs {
+				conv := convs[i]
+				// ListConversations already returns the authoritative conversation
+				// record. Upstream maps that record directly; doing a GetConversation
+				// RPC for every thread fans one sync into dozens of phone requests
+				// and starves sends/history.
+				mapped, meta, err := s.mapConversation(conv)
+				if err != nil && len(conv.GetParticipants()) == 0 {
+					// Older relay responses may omit participants from list rows.
+					// Keep the compatibility fallback, but only for those rows.
+					full, fetchErr := s.getConversation(conv.GetConversationID())
+					if fetchErr != nil {
+						s.log.Warn().Str("conversation", conv.GetConversationID()).Msg("skipping thread")
+						skipped.Add(1)
+						continue
+					}
+					mapped, meta, err = s.mapConversation(full)
 				}
-				mapped, meta, err = s.mapConversation(full)
+				if err != nil {
+					s.log.Warn().Err(err).Msg("skipping thread")
+					skipped.Add(1)
+					continue
+				}
+				s.mu.Lock()
+				s.metas[conv.GetConversationID()] = meta
+				s.mu.Unlock()
+				results[i] = threadResult{index: i, thread: mapped, unread: conv.GetUnread(), ok: true}
 			}
-			if err != nil {
-				s.log.Warn().Err(err).Msg("skipping thread")
-				return
-			}
-			s.mu.Lock()
-			s.metas[conv.GetConversationID()] = meta
-			s.mu.Unlock()
-			results[i] = threadResult{index: i, thread: mapped, unread: conv.GetUnread(), ok: true}
 		}()
 	}
+	for i := range convs {
+		jobs <- i
+	}
+	close(jobs)
 	wg.Wait()
 	for _, result := range results {
 		if result.ok {
 			threads = append(threads, result.thread)
 		}
 	}
-	s.emitConversations(threads, s.nextGeneration())
+	// Only a demonstrably complete listing may close as authoritative.
+	// A capped page or a skipped thread means threads are missing:
+	// merging without reconcile keeps them instead of deleting live
+	// state the daemon still holds.
+	complete := !capped && skipped.Load() == 0
+	if !complete {
+		s.log.Warn().Bool("capped", capped).Int32("skipped", skipped.Load()).Msg("sync incomplete; merging without reconcile")
+	}
+	s.emitConversations(threads, s.nextGeneration(), complete)
 	// Heal message windows for the most recently active threads.
 	// Live events and explicit history fetches cover the rest, but a
 	// queue overflow or a missed suspend gap can drop messages and
@@ -265,7 +283,7 @@ func (s *Session) fullSync(reason string) bool {
 		s.fire(Event{Type: "read", Account: s.account, Conversation: thread.LocalID,
 			Unread: unreads[thread.LocalID]})
 	}
-	if err := s.store.SaveAuth(s.account, s.auth); err != nil {
+	if err := s.saveAuthIfCurrent(generation); err != nil {
 		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
 	}
 	s.log.Debug().Str("reason", reason).Int("threads", len(threads)).Msg("sync complete")
@@ -293,14 +311,17 @@ func (s *Session) nextGeneration() uint64 {
 }
 
 // emitConversations sends the thread list in size-bounded chunks that
-// share one generation. Only the closing chunk is authoritative, so the
-// daemon reconciles once against the whole list instead of removing
-// and re-adding threads that arrive in later chunks. A list that fits
-// in one chunk keeps the single full event.
-func (s *Session) emitConversations(threads []Conversation, generation uint64) {
+// share one generation. Only the closing chunk of a complete sync is
+// authoritative, so the daemon reconciles once against the whole list
+// instead of removing and re-adding threads that arrive in later
+// chunks. A list that fits in one chunk keeps the single full event.
+// An incomplete sync (page cap or skipped threads) merges everything:
+// its threads are a subset, and reconciling a subset would delete
+// live state.
+func (s *Session) emitConversations(threads []Conversation, generation uint64, authoritative bool) {
 	if len(threads) == 0 {
 		s.fire(Event{Type: "conversations", Account: s.account,
-			Conversations: []Conversation{}, Full: true})
+			Conversations: []Conversation{}, Full: authoritative})
 		return
 	}
 	var chunks [][]Conversation
@@ -318,8 +339,8 @@ func (s *Session) emitConversations(threads []Conversation, generation uint64) {
 	for i, chunk := range chunks {
 		last := i == len(chunks)-1
 		evt := Event{Type: "conversations", Account: s.account,
-			Conversations: chunk, Full: last}
-		if len(chunks) > 1 {
+			Conversations: chunk, Full: authoritative && last}
+		if authoritative && len(chunks) > 1 {
 			evt.Generation = generation
 		}
 		s.fire(evt)

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -23,6 +24,26 @@ var errInvalidAccount = errors.New("invalid account name")
 // nothing here ever logs file contents.
 type Store struct {
 	dir string
+
+	sweepMu   sync.Mutex
+	lastSweep time.Time
+}
+
+// maybeSweep runs a staging sweep at most every sweepInterval.
+// Staging ops call it after writing; a non-blocking lock keeps a
+// slow sweep off the transfer path.
+func (s *Store) maybeSweep() {
+	if !s.sweepMu.TryLock() {
+		return
+	}
+	defer s.sweepMu.Unlock()
+	if time.Since(s.lastSweep) < sweepInterval {
+		return
+	}
+	s.lastSweep = time.Now()
+	if removed, err := s.SweepStaged(); err != nil {
+		_ = removed
+	}
 }
 
 // NewStore resolves the adapter state directory. It honors
@@ -162,6 +183,11 @@ const stagedMaxBytes = 256 << 20
 // sessionTmpMaxAge bounds crash-left session temp files. Live saves
 // use unique names and rename away promptly; anything older is debris.
 const sessionTmpMaxAge = time.Hour
+
+// sweepInterval spaces background staging sweeps. Startup sweeps
+// (see main) handle crashed runs; this bounds long-lived processes
+// whose staging would otherwise grow without restart.
+const sweepInterval = time.Hour
 
 // SweepStaged deletes staged attachments older than stagedMaxAge,
 // enforces stagedMaxBytes oldest-first, and clears crash-left session

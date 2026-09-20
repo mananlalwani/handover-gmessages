@@ -93,12 +93,16 @@ func trimSpace(b []byte) []byte {
 }
 
 type hub struct {
-	store    *adapter.Store
-	log      zerolog.Logger
-	emit     func(adapter.Event)
-	out      *bufio.Writer
-	mu       sync.Mutex
-	sessions map[string]*adapter.Session
+	store *adapter.Store
+	log   zerolog.Logger
+	emit  func(adapter.Event)
+	out   *bufio.Writer
+	// sessionsMu guards the session map only. Stdout has its own
+	// lock: a blocked flush must never stall session lookup or
+	// shutdown, and Close must never run under the map lock.
+	sessionsMu sync.Mutex
+	sessions   map[string]*adapter.Session
+	writeMu    sync.Mutex
 }
 
 func (h *hub) write(evt adapter.Event) {
@@ -106,8 +110,8 @@ func (h *hub) write(evt adapter.Event) {
 	if err != nil {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
 	h.out.Write(raw)
 	h.out.Write([]byte("\n"))
 	h.out.Flush()
@@ -119,8 +123,8 @@ func (h *hub) emitEvent(evt adapter.Event) {
 }
 
 func (h *hub) session(account string) *adapter.Session {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.sessionsMu.Lock()
+	defer h.sessionsMu.Unlock()
 	sess, ok := h.sessions[account]
 	if !ok {
 		sess = adapter.NewSession(account, h.store, h.log, h.emit)
@@ -130,21 +134,26 @@ func (h *hub) session(account string) *adapter.Session {
 }
 
 func (h *hub) forget(account string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if sess, ok := h.sessions[account]; ok {
-		sess.Close()
+	// Close outside the map lock: Disconnect is an external call
+	// that must not run under a global lock.
+	h.sessionsMu.Lock()
+	sess, ok := h.sessions[account]
+	if ok {
 		delete(h.sessions, account)
+	}
+	h.sessionsMu.Unlock()
+	if ok {
+		sess.Close()
 	}
 }
 
 func (h *hub) shutdown() {
-	h.mu.Lock()
+	h.sessionsMu.Lock()
 	sessions := make([]*adapter.Session, 0, len(h.sessions))
 	for _, sess := range h.sessions {
 		sessions = append(sessions, sess)
 	}
-	h.mu.Unlock()
+	h.sessionsMu.Unlock()
 	for _, sess := range sessions {
 		sess.Close()
 	}

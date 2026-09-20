@@ -62,8 +62,11 @@ type Session struct {
 	pairCancel context.CancelFunc
 	ps         *libgm.PairingSession
 	fullReq    map[string]time.Time
+	// dirtyConvs holds threads whose relay events were dropped,
+	// awaiting explicit window refresh. See markDirty.
+	dirtyConvs map[string]struct{}
 
-	events    chan any
+	events    chan queuedEvent
 	closed    chan struct{}
 	closeOnce sync.Once
 
@@ -74,7 +77,15 @@ type Session struct {
 	// connectCancel stops the previous reconnect loop before a new
 	// one starts, so re-login never leaves two loops racing.
 	connectCancel context.CancelFunc
-	// generation groups multi-chunk sync emissions. See sync.go.
+	// generation is a monotonic session fence with two jobs. It
+	// groups multi-chunk sync emissions (see sync.go) and it retires
+	// one login session against the next: login, logout, and close
+	// bump it, while persistence, pairing completion, and queued
+	// relay events carry the generation they started with and are
+	// dropped when it no longer matches. Without this, a stale sync
+	// could recreate a session file logout deleted, an old pairing
+	// could persist a newer login's auth, or backlogged events could
+	// mutate the new session's state.
 	generation uint64
 	// resyncing serializes queue-overflow recovery: one catch-up
 	// runs at a time no matter how many overflows fire.
@@ -82,6 +93,14 @@ type Session struct {
 
 	connected     bool
 	authenticated bool
+}
+
+// queuedEvent pairs a relay event with the session generation that
+// enqueued it. The consumer rechecks at dequeue: backlogged events
+// from an old login must not mutate the new session's state.
+type queuedEvent struct {
+	generation uint64
+	event      any
 }
 
 type cachedMessage struct {
@@ -134,7 +153,7 @@ func NewSession(account string, store *Store, log zerolog.Logger, emit func(Even
 		selfIDs: map[string]bool{},
 		cache:   map[string][]cachedMessage{},
 		pending: map[string]pendingSend{},
-		events:  make(chan any, eventQueue),
+		events:  make(chan queuedEvent, eventQueue),
 		closed:  make(chan struct{}),
 	}
 	go session.resumeLoop()
@@ -201,12 +220,14 @@ func (s *Session) buildClient(auth *libgm.AuthData) {
 	s.client.SetEventHandler(func(evt any) {
 		s.mu.Lock()
 		current := s.clientGen == gen
+		sessionGen := s.generation
 		s.mu.Unlock()
 		if !current {
 			return
 		}
+		queued := queuedEvent{generation: sessionGen, event: evt}
 		select {
-		case s.events <- evt:
+		case s.events <- queued:
 		default:
 			s.log.Warn().Msg("relay event queue full, dropping oldest signal")
 			select {
@@ -214,13 +235,17 @@ func (s *Session) buildClient(auth *libgm.AuthData) {
 			default:
 			}
 			select {
-			case s.events <- evt:
+			case s.events <- queued:
 			default:
 			}
 			// A dropped relay event is a gap the daemon cannot see:
 			// message, delete, and auth signals may now be lost.
-			// Schedule one serialized catch-up so the loss heals
+			// Record the affected thread for targeted repair and
+			// schedule one serialized catch-up so the loss heals
 			// instead of lingering.
+			if convID := conversationOf(evt); convID != "" {
+				s.markDirty(convID)
+			}
 			s.requestResync()
 		}
 	})
@@ -235,7 +260,72 @@ func (s *Session) requestResync() {
 	go func() {
 		defer s.resyncing.Store(false)
 		s.fullSync("event-queue-overflow")
+		s.refreshDirty()
 	}()
+}
+
+// maxDirtyConvs bounds targeted overflow repair. Beyond the cap the
+// oldest dirty marks drop and the next full sync still converges.
+const maxDirtyConvs = 64
+
+// markDirty records a conversation whose relay events were dropped,
+// so repair can refresh its window explicitly instead of hoping it
+// lands in the recent ten.
+func (s *Session) markDirty(convID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dirtyConvs == nil {
+		s.dirtyConvs = map[string]struct{}{}
+	}
+	if _, ok := s.dirtyConvs[convID]; ok {
+		return
+	}
+	if len(s.dirtyConvs) >= maxDirtyConvs {
+		for old := range s.dirtyConvs {
+			delete(s.dirtyConvs, old)
+			break
+		}
+	}
+	s.dirtyConvs[convID] = struct{}{}
+}
+
+// takeDirty drains the dirty set for one repair pass.
+func (s *Session) takeDirty() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.dirtyConvs))
+	for convID := range s.dirtyConvs {
+		out = append(out, convID)
+	}
+	s.dirtyConvs = map[string]struct{}{}
+	return out
+}
+
+// refreshDirty re-emits full windows for conversations whose events
+// were dropped, sequentially so the relay never faces fan-out.
+func (s *Session) refreshDirty() {
+	for _, convID := range s.takeDirty() {
+		if !s.alive() {
+			return
+		}
+		s.emitWindow(convID, messageWindow, nil, true, true)
+	}
+}
+
+// conversationOf extracts the thread id from relay events that carry
+// one. Events without a thread return "".
+func conversationOf(evt any) string {
+	switch evt := evt.(type) {
+	case *gmproto.Conversation:
+		return evt.GetConversationID()
+	case *libgm.WrappedMessage:
+		if evt.Message != nil {
+			return evt.Message.GetConversationID()
+		}
+	case *gmproto.TypingData:
+		return evt.GetConversationID()
+	}
+	return ""
 }
 
 // alive reports whether the session still accepts work. Events fired
@@ -248,6 +338,39 @@ func (s *Session) alive() bool {
 	default:
 		return true
 	}
+}
+
+// bumpGeneration retires the current login session: queued events,
+// in-flight pairing, and pending saves from the old generation stop
+// applying. Callers hold no locks; this takes its own.
+func (s *Session) bumpGeneration() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.generation++
+	if s.generation == 0 {
+		s.generation = 1
+	}
+	return s.generation
+}
+
+// currentGeneration reads the session generation under lock.
+func (s *Session) currentGeneration() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.generation
+}
+
+// saveAuthIfCurrent persists auth only when the caller's generation
+// is still current and auth is present. A stale sync must never
+// recreate a session file logout deleted, and teardown must never
+// persist a nil auth as JSON null.
+func (s *Session) saveAuthIfCurrent(generation uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation != s.generation || s.auth == nil {
+		return nil
+	}
+	return s.store.SaveAuth(s.account, s.auth)
 }
 
 // fire emits unless the session was closed.
@@ -363,7 +486,7 @@ func (s *Session) connectOnce(ctx context.Context) error {
 	s.mu.Unlock()
 	s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
 		Connected: true, Authenticated: true})
-	if err := s.store.SaveAuth(s.account, s.auth); err != nil {
+	if err := s.saveAuthIfCurrent(s.currentGeneration()); err != nil {
 		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
 	}
 	// libgm's postConnect callback activates the phone session asynchronously
@@ -400,8 +523,16 @@ func (s *Session) eventLoop() {
 		select {
 		case <-s.closed:
 			return
-		case evt := <-s.events:
-			s.handleRelayEvent(evt)
+		case queued := <-s.events:
+			// Recheck at dequeue: backlogged events from an old
+			// login must not mutate the new session's state.
+			s.mu.Lock()
+			current := s.generation == queued.generation
+			s.mu.Unlock()
+			if !current {
+				continue
+			}
+			s.handleRelayEvent(queued.event)
 		}
 	}
 }
@@ -462,7 +593,7 @@ func (s *Session) handleRelayEvent(evt any) {
 		if auth == nil {
 			break
 		}
-		if err := s.store.SaveAuth(s.account, auth); err != nil {
+		if err := s.saveAuthIfCurrent(s.currentGeneration()); err != nil {
 			s.log.Warn().Err(err).Msg("persisting refreshed session failed")
 		}
 	case *events.GaiaLoggedOut:
