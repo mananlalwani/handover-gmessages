@@ -70,6 +70,12 @@ Restarting Handover or the adapter should reuse the saved session and
 resynchronize account state. A disconnected account must appear offline until
 the helper reconnects.
 
+Sessions persist as 0600 files below
+`${XDG_STATE_HOME:-~/.local/state}/handover/gmessages`. Staged
+attachments are transient transfer data, swept at adapter startup:
+files older than 7 days go, and the directory is capped at 256 MiB
+oldest-first.
+
 If the session cannot recover, repeat the pairing process. Check the service
 logs without sharing their contents publicly:
 

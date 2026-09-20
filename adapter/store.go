@@ -7,7 +7,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 )
@@ -56,8 +58,10 @@ func (s *Store) ensureDir() error {
 	return os.Chmod(s.dir, 0o700)
 }
 
-// SaveAuth persists one account's libgm session atomically with 0600
-// permissions.
+// SaveAuth persists one account's libgm session with 0600
+// permissions. The write goes to a unique temp file in the same
+// directory before an atomic rename: concurrent saves for one
+// account must never share (and clobber) a single temp path.
 func (s *Store) SaveAuth(account string, auth *libgm.AuthData) error {
 	path, ok := s.accountFile(account)
 	if !ok {
@@ -70,15 +74,25 @@ func (s *Store) SaveAuth(account string, auth *libgm.AuthData) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".session-*.tmp")
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		os.Remove(tmp)
+	tmpName := tmp.Name()
+	// Best effort cleanup; the rename below removes the common path.
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // LoadAuth reads one account's session. A missing file is not an error.
@@ -135,4 +149,88 @@ func (s *Store) StageDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+// Staged retention bounds: transfer data is transient, but nothing
+// deletes it after delivery. Files older than this are garbage.
+const stagedMaxAge = 7 * 24 * time.Hour
+
+// stagedMaxBytes caps the staging directory. Beyond the cap the
+// oldest files go first, so one large transfer cannot pin the disk.
+const stagedMaxBytes = 256 << 20
+
+// sessionTmpMaxAge bounds crash-left session temp files. Live saves
+// use unique names and rename away promptly; anything older is debris.
+const sessionTmpMaxAge = time.Hour
+
+// SweepStaged deletes staged attachments older than stagedMaxAge,
+// enforces stagedMaxBytes oldest-first, and clears crash-left session
+// temp files. It returns the number of files removed. Only regular
+// non-symlink files are ever deleted.
+func (s *Store) SweepStaged() (int, error) {
+	removed := 0
+	dir, err := s.StageDir()
+	if err != nil {
+		return 0, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	type candidate struct {
+		path    string
+		size    int64
+		modTime time.Time
+	}
+	var kept []candidate
+	var total int64
+	cutoff := time.Now().Add(-stagedMaxAge)
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(path); err == nil {
+				removed++
+			}
+			continue
+		}
+		kept = append(kept, candidate{path: path, size: info.Size(), modTime: info.ModTime()})
+		total += info.Size()
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].modTime.Before(kept[j].modTime) })
+	for _, c := range kept {
+		if total <= stagedMaxBytes {
+			break
+		}
+		if err := os.Remove(c.path); err == nil {
+			removed++
+			total -= c.size
+		}
+	}
+	// Crash-left session temps share the store directory, not staging.
+	sessionEntries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return removed, nil
+	}
+	tmpCutoff := time.Now().Add(-sessionTmpMaxAge)
+	for _, entry := range sessionEntries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, ".session-") || !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(tmpCutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.dir, name)); err == nil {
+			removed++
+		}
+	}
+	return removed, nil
 }

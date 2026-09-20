@@ -48,6 +48,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "state directory unavailable")
 		os.Exit(1)
 	}
+	// Staged attachments are transient transfer data. Sweep debris
+	// from crashed runs at startup so the directory stays bounded.
+	if removed, err := store.SweepStaged(); err != nil {
+		log.Warn().Err(err).Msg("sweeping staged attachments failed")
+	} else if removed > 0 {
+		log.Info().Int("removed", removed).Msg("swept staged attachments")
+	}
 
 	h := &hub{store: store, log: log, sessions: map[string]*adapter.Session{}}
 	h.emit = h.emitEvent

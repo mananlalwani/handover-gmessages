@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -100,6 +101,46 @@ func TestSanitizeName(t *testing.T) {
 	}
 	if got, ok := sanitizeName(long); !ok || len(got) != 255 {
 		t.Errorf("long name = %d,%v", len(got), ok)
+	}
+}
+
+func TestSweepStagedBoundsRetention(t *testing.T) {
+	dir := t.TempDir()
+	store := &Store{dir: dir}
+	staged, err := store.StageDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-stagedMaxAge - time.Hour).Unix()
+	write := func(name string, size int, modTime time.Time) {
+		path := filepath.Join(staged, name)
+		if err := os.WriteFile(path, make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fresh := time.Now()
+	write("fresh.bin", 10, fresh)
+	write("old.bin", 10, time.Unix(old, 0))
+	if err := os.Symlink("fresh.bin", filepath.Join(staged, "link.bin")); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := store.SweepStaged()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Errorf("sweep removed %d files, want 1 (the expired one)", removed)
+	}
+	for _, name := range []string{"fresh.bin", "link.bin"} {
+		if _, err := os.Lstat(filepath.Join(staged, name)); err != nil {
+			t.Errorf("%s must survive the sweep: %v", name, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(staged, "old.bin")); !os.IsNotExist(err) {
+		t.Error("expired file must be swept")
 	}
 }
 

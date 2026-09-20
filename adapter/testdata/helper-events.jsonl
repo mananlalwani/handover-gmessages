@@ -1,0 +1,19 @@
+{"helper_protocol":1,"name":"handover-gmessages/libgm","type":"hello"}
+{"account":"gmessages:default","authenticated":true,"connected":true,"label":"Google Messages","type":"account"}
+{"account":"gmessages:default","prompt":"Tap 1 in Google Messages on the phone to confirm linking","type":"pairing"}
+{"account":"gmessages:default","conversations":[{"local_id":"t1","kind":"direct","transport":"rcs","participants":[{"local_id":"peer"}],"capabilities":["text"]}],"full":false,"generation":11,"type":"conversations"}
+{"account":"gmessages:default","conversations":[{"local_id":"t2","kind":"direct","transport":"rcs","participants":[{"local_id":"peer"}],"capabilities":["text"]}],"full":true,"generation":11,"type":"conversations"}
+{"account":"gmessages:default","conversation":"t0","type":"conversation_removed"}
+{"account":"gmessages:default","conversation":"t1","full":false,"generation":12,"messages":[{"local_id":"m1","sender":"peer","text":"hello"}],"page_complete":false,"type":"messages"}
+{"account":"gmessages:default","conversation":"t1","cursor_next":"m1:1700000000000","full":true,"generation":12,"messages":[{"local_id":"m2","sender":"peer","text":"hello"}],"page_complete":true,"type":"messages"}
+{"account":"gmessages:default","conversation":"t1","message":"m0","type":"message_removed"}
+{"account":"gmessages:default","conversation":"t1","message":"txn-1","status":"accepted","type":"status"}
+{"account":"gmessages:default","conversation":"t1","message":"m2","status":"sent","type":"status"}
+{"account":"gmessages:default","conversation":"t1","message":"txn-2","status":"failed:transport","type":"status"}
+{"account":"gmessages:default","conversation":"t1","participants":["+15550000000"],"type":"typing"}
+{"account":"gmessages:default","conversation":"t1","last_read_message":"m2","type":"read","unread":false}
+{"ok":true,"request_id":"r1","type":"command_result"}
+{"error":"send failed","ok":false,"request_id":"r2","type":"command_result"}
+{"message":"history fetch failed","type":"error"}
+{"account":"gmessages:default","type":"account_removed"}
+{"type":"messages","account":"gmessages:default","conversation":"t1","messages":[],"page_complete":true,"full":false,"future_flag":true}
