@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -85,6 +87,12 @@ func (s *Session) Login(bundle []byte) {
 		s.pairCancel()
 		s.pairCancel = nil
 	}
+	// Stop the previous reconnect loop now, not after pairing: it
+	// would otherwise wake mid-pairing and drive the new client.
+	if s.connectCancel != nil {
+		s.connectCancel()
+		s.connectCancel = nil
+	}
 	// Never run two relay sessions for one account: a lingering
 	// pairing-era poll makes the server invalidate the new session
 	// (observed as an instant GaiaLoggedOut right after auth).
@@ -92,11 +100,18 @@ func (s *Session) Login(bundle []byte) {
 		s.client.Disconnect()
 		s.client = nil
 	}
+	// A new login era starts offline: if pairing fails below, the
+	// daemon must not retain the previous online state for a
+	// session that no longer exists.
+	s.connected = false
+	s.authenticated = false
 	s.auth = auth
 	s.buildClient(auth)
 	client := s.client
 	s.mu.Unlock()
 	s.runEventLoop()
+	s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
+		Connected: false, Authenticated: false})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	if err := client.FetchConfig(ctx); err != nil {
@@ -351,7 +366,7 @@ func sendToRelay(ctx context.Context, client *libgm.Client, req *gmproto.SendMes
 
 // SendMedia relays one staged file with an optional caption.
 func (s *Session) SendMedia(requestID, convID, path, caption string) {
-	data, name, mime, err := readStagedUpload(path)
+	data, name, mime, err := s.readStagedUpload(path)
 	if err != nil {
 		s.failure(requestID, "unreadable file")
 		return
@@ -423,8 +438,11 @@ func (s *Session) SendMedia(requestID, convID, path, caption string) {
 
 // readStagedUpload reads a daemon-staged file with a hard cap. The path
 // comes from the daemon over the local pipe; it is still validated as a
-// sized regular file before reading.
-func readStagedUpload(path string) ([]byte, string, string, error) {
+// sized regular file before reading. After a successful read, a file
+// that lives under a known staging root is unlinked: the daemon hands
+// ownership to the reader, and terminal cleanup on the daemon side
+// cannot know when the read finished.
+func (s *Session) readStagedUpload(path string) ([]byte, string, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, "", "", err
@@ -451,7 +469,58 @@ func readStagedUpload(path string) ([]byte, string, string, error) {
 		}
 		name = name[i+1:]
 	}
+	s.removeStagedSource(path)
 	return data, name, http.DetectContentType(data), nil
+}
+
+// removeStagedSource unlinks a successfully read upload, but only
+// when it sits under a known staging root. Anything else (user
+// files, unexpected locations) is never deleted by the reader.
+func (s *Session) removeStagedSource(path string) {
+	staged, err := s.store.StageDir()
+	if err != nil {
+		return
+	}
+	if !withinDir(path, staged) && !withinDir(path, daemonStagingDir()) {
+		return
+	}
+	os.Remove(path)
+}
+
+// withinDir reports whether path resolves inside dir. Symlinks never
+// match: the reader only deletes what it validated as a regular
+// file at a literal staging path.
+func withinDir(path, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(dir, abs)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	if info, err := os.Lstat(abs); err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	return true
+}
+
+// daemonStagingDir mirrors the daemon's outbound staging root
+// (handover/gmessages/staging below XDG state). Daemon-staged
+// copies live here.
+func daemonStagingDir() string {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(base, "handover", "gmessages", "staging")
 }
 
 // React adds, switches, or removes a reaction. Current self-reaction
@@ -611,6 +680,12 @@ func (s *Session) MarkRead(convID, msgID string) {
 // Typing relays a typing-start ping. There is no typing-stop upstream,
 // so none is representable here.
 func (s *Session) Typing(convID string) {
+	// Typing pings are ephemeral: a second ping while one is in
+	// flight is dropped rather than queued.
+	if !s.typingActive.CompareAndSwap(false, true) {
+		return
+	}
+	defer s.typingActive.Store(false)
 	s.mu.Lock()
 	client := s.client
 	outgoing := ""
@@ -708,7 +783,7 @@ func (s *Session) Open(requestID string, addresses []string) {
 		s.mu.Unlock()
 		s.fire(Event{Type: "conversations", Account: s.account,
 			Conversations: []Conversation{mapped}})
-		s.emitWindow(conv.GetConversationID(), messageWindow, nil, false, true)
+		s.emitWindow(conv.GetConversationID(), messageWindow, nil, false, true, 0)
 	}
 }
 
@@ -725,6 +800,10 @@ func (s *Session) Logout() bool {
 	}
 	client := s.client
 	s.mu.Unlock()
+	// Retire the lifecycle before touching remote or storage state:
+	// anything in flight from before the logout (saves, syncs,
+	// queued events) must not recreate what this call deletes.
+	s.bumpLifecycle()
 	if client != nil {
 		ctx, cancel := timeoutCtx()
 		defer cancel()

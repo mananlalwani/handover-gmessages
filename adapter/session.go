@@ -4,6 +4,7 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -65,6 +66,8 @@ type Session struct {
 	// dirtyConvs holds threads whose relay events were dropped,
 	// awaiting explicit window refresh. See markDirty.
 	dirtyConvs map[string]struct{}
+	// dirtyOrder is the FIFO eviction order for dirtyConvs.
+	dirtyOrder []string
 
 	events    chan queuedEvent
 	closed    chan struct{}
@@ -94,6 +97,15 @@ type Session struct {
 	// resyncing serializes queue-overflow recovery: one catch-up
 	// runs at a time no matter how many overflows fire.
 	resyncing atomic.Bool
+	// saveMu serializes session-file publishes. The generation
+	// recheck in saveAuthIfCurrent runs under it, so two concurrent
+	// saves cannot publish out of order.
+	saveMu sync.Mutex
+	// syncActive collapses redundant syncs: a second Sync while one
+	// runs returns immediately instead of queueing behind it. Typing
+	// pings coalesce the same way; a dropped ping loses nothing.
+	syncActive   atomic.Bool
+	typingActive atomic.Bool
 
 	connected     bool
 	authenticated bool
@@ -274,7 +286,9 @@ const maxDirtyConvs = 64
 
 // markDirty records a conversation whose relay events were dropped,
 // so repair can refresh its window explicitly instead of hoping it
-// lands in the recent ten.
+// lands in the recent ten. Eviction is FIFO: the oldest dirty mark
+// drops first, and a saturated set triggers broader recovery via
+// the full sync that always accompanies repair.
 func (s *Session) markDirty(convID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -284,13 +298,12 @@ func (s *Session) markDirty(convID string) {
 	if _, ok := s.dirtyConvs[convID]; ok {
 		return
 	}
-	if len(s.dirtyConvs) >= maxDirtyConvs {
-		for old := range s.dirtyConvs {
-			delete(s.dirtyConvs, old)
-			break
-		}
+	if len(s.dirtyOrder) >= maxDirtyConvs {
+		delete(s.dirtyConvs, s.dirtyOrder[0])
+		s.dirtyOrder = s.dirtyOrder[1:]
 	}
 	s.dirtyConvs[convID] = struct{}{}
+	s.dirtyOrder = append(s.dirtyOrder, convID)
 }
 
 // takeDirty drains the dirty set for one repair pass.
@@ -302,6 +315,7 @@ func (s *Session) takeDirty() []string {
 		out = append(out, convID)
 	}
 	s.dirtyConvs = map[string]struct{}{}
+	s.dirtyOrder = nil
 	return out
 }
 
@@ -312,7 +326,7 @@ func (s *Session) refreshDirty() {
 		if !s.alive() {
 			return
 		}
-		s.emitWindow(convID, messageWindow, nil, true, true)
+		s.emitWindow(convID, messageWindow, nil, true, true, 0)
 	}
 }
 
@@ -368,13 +382,32 @@ func (s *Session) currentLifecycle() uint64 {
 // is still current and auth is present. A stale sync must never
 // recreate a session file logout deleted, and teardown must never
 // persist a nil auth as JSON null.
+//
+// Disk I/O happens outside the session lock: marshalling and the
+// temp-file dance run unlocked, with a save mutex serializing
+// concurrent saves and a final generation recheck before publish.
 func (s *Session) saveAuthIfCurrent(lifecycle uint64) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if lifecycle != s.lifecycle || s.auth == nil {
+		s.mu.Unlock()
 		return nil
 	}
-	return s.store.SaveAuth(s.account, s.auth)
+	auth := s.auth
+	account := s.account
+	s.mu.Unlock()
+	raw, err := json.Marshal(auth)
+	if err != nil {
+		return err
+	}
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	s.mu.Lock()
+	current := lifecycle == s.lifecycle && s.auth == auth
+	s.mu.Unlock()
+	if !current {
+		return nil
+	}
+	return s.store.WriteAuth(account, raw)
 }
 
 // fire emits unless the session was closed.
@@ -383,6 +416,22 @@ func (s *Session) fire(evt Event) {
 		return
 	}
 	s.emit(evt)
+}
+
+// fireIfCurrent emits only while the caller's lifecycle is still
+// current. Relay handlers block in RPCs during which a relogin can
+// retire the session; without this, the stale handler would commit
+// state (metas, cache, emissions) belonging to the new session.
+func (s *Session) fireIfCurrent(lifecycle uint64, evt Event) {
+	if s.currentLifecycle() != lifecycle {
+		return
+	}
+	s.fire(evt)
+}
+
+// current reports whether a captured lifecycle is still current.
+func (s *Session) current(lifecycle uint64) bool {
+	return s.currentLifecycle() == lifecycle
 }
 
 // runEventLoop starts the single relay event consumer.
@@ -536,12 +585,12 @@ func (s *Session) eventLoop() {
 			if !current {
 				continue
 			}
-			s.handleRelayEvent(queued.event)
+			s.handleRelayEvent(queued.event, queued.lifecycle)
 		}
 	}
 }
 
-func (s *Session) handleRelayEvent(evt any) {
+func (s *Session) handleRelayEvent(evt any, lifecycle uint64) {
 	switch evt := evt.(type) {
 	case *gmproto.Conversation:
 		// Refresh the full record: event parts may be partial.
@@ -550,18 +599,24 @@ func (s *Session) handleRelayEvent(evt any) {
 			s.log.Warn().Str("conversation", evt.GetConversationID()).Msg("refreshing conversation failed")
 			return
 		}
+		if !s.current(lifecycle) {
+			return
+		}
 		mapped, meta, err := s.mapConversation(conv)
 		if err != nil {
 			s.log.Warn().Err(err).Msg("dropping invalid conversation")
 			return
 		}
+		if !s.current(lifecycle) {
+			return
+		}
 		s.mu.Lock()
 		s.metas[conv.GetConversationID()] = meta
 		s.mu.Unlock()
-		s.fire(Event{Type: "conversations", Account: s.account,
+		s.fireIfCurrent(lifecycle, Event{Type: "conversations", Account: s.account,
 			Conversations: []Conversation{mapped}})
 	case *libgm.WrappedMessage:
-		s.handleMessage(evt.Message, evt.IsOld)
+		s.handleMessage(evt.Message, evt.IsOld, lifecycle)
 	case *gmproto.TypingData:
 		participants := []string{}
 		if evt.GetType() == gmproto.TypingTypes_STARTED_TYPING && evt.GetUser().GetNumber() != "" {

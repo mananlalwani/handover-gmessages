@@ -29,8 +29,11 @@ func messageTransport(kind int64) string {
 // is false (bulk sync windows), media parts keep metadata with no
 // staged path: bytes resolve on explicit history fetches and live
 // deliveries instead of stalling the sync on hundreds of downloads.
-func (s *Session) mapMessage(convID string, msg *gmproto.Message, download bool) (*Message, string) {
+func (s *Session) mapMessage(convID string, msg *gmproto.Message, download bool, lifecycle uint64) (*Message, string) {
 	if msg == nil || msg.GetMessageID() == "" {
+		return nil, ""
+	}
+	if !s.current(lifecycle) {
 		return nil, ""
 	}
 	status := msg.GetMessageStatus().GetStatus()
@@ -66,6 +69,12 @@ func (s *Session) mapMessage(convID string, msg *gmproto.Message, download bool)
 	for i, part := range media {
 		attachment := s.stageMedia(convID, msg, part, i, download)
 		out.Attachments = append(out.Attachments, attachment)
+	}
+	// Downloads block in RPCs during which the session may have
+	// retired. Dropping the mapped content keeps stale bytes, cache
+	// entries, and staged files out of the new session.
+	if !s.current(lifecycle) {
+		return nil, ""
 	}
 	if reply := msg.GetReplyMessage(); reply != nil && reply.GetMessageID() != "" {
 		// Cross-thread replies cannot be represented; keep the message

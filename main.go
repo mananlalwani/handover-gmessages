@@ -159,6 +159,45 @@ func (h *hub) shutdown() {
 	}
 }
 
+// maxCommandWorkers bounds concurrent command goroutines. Every
+// helper command fans out with `go`; without admission, repeated
+// syncs pile goroutines on syncMu while RPC commands fan out
+// unbounded underneath.
+const maxCommandWorkers = 16
+
+var commandSem = make(chan struct{}, maxCommandWorkers)
+
+// spawn runs fn under admission control, reporting false when the
+// worker pool is full so the caller can fail fast instead of
+// queueing without bound.
+func (h *hub) spawn(fn func()) bool {
+	select {
+	case commandSem <- struct{}{}:
+		go func() {
+			defer func() { <-commandSem }()
+			fn()
+		}()
+		return true
+	default:
+		return false
+	}
+}
+
+// dispatchAsync runs a session command under hub admission control.
+// Request-ID commands fail fast with a busy result when the pool is
+// full; fire-and-forget commands surface a busy error event.
+func (h *hub) dispatchAsync(account, requestID string, fn func(*adapter.Session)) {
+	sess := h.session(account)
+	if h.spawn(func() { fn(sess) }) {
+		return
+	}
+	if requestID != "" {
+		sess.SendResult(requestID, false, "busy")
+		return
+	}
+	h.write(adapter.Event{Type: "error", Account: account, Message: "busy"})
+}
+
 func (h *hub) dispatch(cmd adapter.Command) {
 	h.log.Debug().Str("command", adapter.SanitizeCommand(cmd)).Msg("daemon command")
 	switch cmd.Type {
@@ -178,7 +217,7 @@ func (h *hub) dispatch(cmd adapter.Command) {
 		// Pairing runs for minutes. Never hold the command loop for
 		// it: shutdown and other commands must stay responsive.
 		account := cmd.Account
-		go h.session(account).Login(bundle)
+		h.dispatchAsync(account, "", func(sess *adapter.Session) { sess.Login(bundle) })
 	case "logout":
 		if !validAccount(cmd.Account) {
 			return
@@ -188,17 +227,17 @@ func (h *hub) dispatch(cmd adapter.Command) {
 		// live session while the daemon believes access ended. The
 		// revoke runs async so a hung phone cannot trap the loop.
 		account := cmd.Account
-		go func() {
-			if h.session(account).Logout() {
+		h.dispatchAsync(account, "", func(sess *adapter.Session) {
+			if sess.Logout() {
 				h.forget(account)
 			}
-		}()
+		})
 	case "list_conversations", "sync":
 		if !validAccount(cmd.Account) {
 			return
 		}
 		account := cmd.Account
-		go h.session(account).Sync()
+		h.dispatchAsync(account, "", func(sess *adapter.Session) { sess.Sync() })
 	case "fetch_history":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" {
 			return
@@ -212,50 +251,62 @@ func (h *hub) dispatch(cmd adapter.Command) {
 			cursor = &cmd.Cursor
 		}
 		account, conversation := cmd.Account, cmd.Conversation
-		go h.session(account).FetchHistory(conversation, limit, cursor)
+		h.dispatchAsync(account, "", func(sess *adapter.Session) {
+			sess.FetchHistory(conversation, limit, cursor, cmd.FetchID)
+		})
 	case "send_text":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" || cmd.RequestID == "" {
 			return
 		}
 		account, conversation, text, replyTo, requestID := cmd.Account, cmd.Conversation, cmd.Text, cmd.ReplyTo, cmd.RequestID
-		go h.session(account).SendText(requestID, conversation, text, replyTo)
+		h.dispatchAsync(account, requestID, func(sess *adapter.Session) {
+			sess.SendText(requestID, conversation, text, replyTo)
+		})
 	case "send_media":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" || cmd.RequestID == "" || cmd.Path == "" {
 			h.session(cmd.Account).SendResult(cmd.RequestID, false, "unreadable file")
 			return
 		}
 		account, conversation, path, caption, requestID := cmd.Account, cmd.Conversation, cmd.Path, cmd.Caption, cmd.RequestID
-		go h.session(account).SendMedia(requestID, conversation, path, caption)
+		h.dispatchAsync(account, requestID, func(sess *adapter.Session) {
+			sess.SendMedia(requestID, conversation, path, caption)
+		})
 	case "react":
 		if !validAccount(cmd.Account) || cmd.RequestID == "" {
 			return
 		}
 		account, conversation, message, emoji, add, requestID := cmd.Account, cmd.Conversation, cmd.Message, cmd.Emoji, cmd.Add, cmd.RequestID
-		go h.session(account).React(requestID, conversation, message, emoji, add)
+		h.dispatchAsync(account, requestID, func(sess *adapter.Session) {
+			sess.React(requestID, conversation, message, emoji, add)
+		})
 	case "mark_read":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" {
 			return
 		}
 		account, conversation, message := cmd.Account, cmd.Conversation, cmd.Message
-		go h.session(account).MarkRead(conversation, message)
+		h.dispatchAsync(account, "", func(sess *adapter.Session) { sess.MarkRead(conversation, message) })
 	case "typing":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" {
 			return
 		}
 		account, conversation := cmd.Account, cmd.Conversation
-		go h.session(account).Typing(conversation)
+		h.dispatchAsync(account, "", func(sess *adapter.Session) { sess.Typing(conversation) })
 	case "delete_message":
 		if !validAccount(cmd.Account) || cmd.RequestID == "" {
 			return
 		}
 		account, message, requestID := cmd.Account, cmd.Message, cmd.RequestID
-		go h.session(account).DeleteMessage(requestID, message)
+		h.dispatchAsync(account, requestID, func(sess *adapter.Session) {
+			sess.DeleteMessage(requestID, message)
+		})
 	case "open_conversation":
 		if !validAccount(cmd.Account) || cmd.RequestID == "" {
 			return
 		}
 		account, addresses, requestID := cmd.Account, cmd.Addresses, cmd.RequestID
-		go h.session(account).Open(requestID, addresses)
+		h.dispatchAsync(account, requestID, func(sess *adapter.Session) {
+			sess.Open(requestID, addresses)
+		})
 	default:
 		h.write(adapter.Event{Type: "error", Message: "unknown command"})
 	}

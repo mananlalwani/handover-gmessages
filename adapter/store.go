@@ -84,15 +84,22 @@ func (s *Store) ensureDir() error {
 // directory before an atomic rename: concurrent saves for one
 // account must never share (and clobber) a single temp path.
 func (s *Store) SaveAuth(account string, auth *libgm.AuthData) error {
+	raw, err := json.Marshal(auth)
+	if err != nil {
+		return err
+	}
+	return s.WriteAuth(account, raw)
+}
+
+// WriteAuth persists pre-marshaled session bytes through a unique
+// temp file and atomic rename. Split from SaveAuth so callers can
+// marshal and gate outside their own locks before touching disk.
+func (s *Store) WriteAuth(account string, raw []byte) error {
 	path, ok := s.accountFile(account)
 	if !ok {
 		return errInvalidAccount
 	}
 	if err := s.ensureDir(); err != nil {
-		return err
-	}
-	raw, err := json.Marshal(auth)
-	if err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".session-*.tmp")

@@ -38,6 +38,11 @@ type Command struct {
 	Limit        uint32   `json:"limit,omitempty"`
 	Cursor       string   `json:"cursor,omitempty"`
 	RequestID    string   `json:"request_id,omitempty"`
+	// FetchID matches a FetchHistory request to its response pages.
+	// The daemon sends it; every messages event of the page echoes
+	// it so background windows can never complete an explicit
+	// waiter. Zero means the daemon did not ask (or predates ids).
+	FetchID uint64 `json:"fetch_id,omitempty"`
 }
 
 // Event is one JSON line to the daemon (stdout).
@@ -56,19 +61,21 @@ type Event struct {
 	// last chunk of a generation carries full=true; the daemon
 	// reconciles once the generation closes instead of per chunk.
 	// Zero means ungrouped (single-chunk or live events).
-	Generation      uint64    `json:"generation,omitempty"`
-	Conversation    string    `json:"conversation,omitempty"`
-	Messages        []Message `json:"messages,omitempty"`
-	CursorNext      string    `json:"cursor_next,omitempty"`
-	PageComplete    bool      `json:"page_complete,omitempty"`
-	Message         string    `json:"message,omitempty"`
-	Status          string    `json:"status,omitempty"`
-	Participants    []string  `json:"participants,omitempty"`
-	LastReadMessage string    `json:"last_read_message,omitempty"`
-	Unread          bool      `json:"unread,omitempty"`
-	RequestID       string    `json:"request_id,omitempty"`
-	OK              bool      `json:"ok,omitempty"`
-	Error           string    `json:"error,omitempty"`
+	Generation   uint64    `json:"generation,omitempty"`
+	Conversation string    `json:"conversation,omitempty"`
+	Messages     []Message `json:"messages,omitempty"`
+	CursorNext   string    `json:"cursor_next,omitempty"`
+	PageComplete bool      `json:"page_complete,omitempty"`
+	// FetchID echoes a FetchHistory request id (see Command).
+	FetchID         uint64   `json:"fetch_id,omitempty"`
+	Message         string   `json:"message,omitempty"`
+	Status          string   `json:"status,omitempty"`
+	Participants    []string `json:"participants,omitempty"`
+	LastReadMessage string   `json:"last_read_message,omitempty"`
+	Unread          bool     `json:"unread,omitempty"`
+	RequestID       string   `json:"request_id,omitempty"`
+	OK              bool     `json:"ok,omitempty"`
+	Error           string   `json:"error,omitempty"`
 }
 
 // MarshalJSON emits exactly the Handover helper IPC v1 shapes. Arrays
@@ -117,6 +124,9 @@ func (e Event) MarshalJSON() ([]byte, error) {
 		out["full"] = e.Full
 		if e.Generation != 0 {
 			out["generation"] = e.Generation
+		}
+		if e.FetchID != 0 {
+			out["fetch_id"] = e.FetchID
 		}
 	case "message_removed":
 		out["account"] = e.Account

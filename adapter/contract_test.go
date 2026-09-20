@@ -247,7 +247,7 @@ func TestChunkedEmissionStaysUnderBound(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		msgs = append(msgs, Message{LocalID: "m", Sender: "p", Text: string(make([]byte, 3000))})
 	}
-	sess.emitMessages("c", msgs, true, "m:1")
+	sess.emitMessages("c", msgs, true, "m:1", 41)
 	if len(got) < 2 {
 		t.Fatalf("30 large messages must chunk, got %d events", len(got))
 	}

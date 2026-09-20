@@ -67,17 +67,22 @@ func (s *Session) mapConversation(conv *gmproto.Conversation) (Conversation, *co
 }
 
 // Sync re-emits authoritative state for one account. It is the
-// catch-up primitive after (re)connects on either side.
+// catch-up primitive after (re)connects on either side. Concurrent
+// syncs collapse into the running one.
 func (s *Session) Sync() {
+	if !s.syncActive.CompareAndSwap(false, true) {
+		return
+	}
+	defer s.syncActive.Store(false)
 	s.fullSync("sync")
 }
 
 // FetchHistory pages one thread window for the daemon.
-func (s *Session) FetchHistory(convID string, limit uint32, cursor *string) {
+func (s *Session) FetchHistory(convID string, limit uint32, cursor *string, fetchID uint64) {
 	if limit < 1 || limit > 100 {
 		limit = messageWindow
 	}
-	s.emitWindow(convID, limit, cursor, false, true)
+	s.emitWindow(convID, limit, cursor, false, true, fetchID)
 }
 
 // SendResult reports acceptance for commands rejected before any relay
@@ -112,11 +117,17 @@ const recentWindowRefresh = 10
 // treated as authoritative for a large library: accounts with more
 // threads than one page would otherwise lose older conversations from
 // normalized state on every sync.
-func (s *Session) listAllConversations(client *libgm.Client) ([]*gmproto.Conversation, bool, error) {
+// listAllConversations pages the whole inbox, aborting with an
+// error when the session retires mid-listing so a stale page set
+// never becomes authoritative.
+func (s *Session) listAllConversations(client *libgm.Client, lifecycle uint64) ([]*gmproto.Conversation, bool, error) {
 	var all []*gmproto.Conversation
 	seen := map[string]bool{}
 	var cursor *gmproto.Cursor
 	for page := 0; page < maxSyncPages; page++ {
+		if !s.current(lifecycle) {
+			return nil, false, fmt.Errorf("session retired during listing")
+		}
 		resp, err := s.listPage(client, cursor)
 		if err != nil {
 			// Match libgm's recovery ladder: a phone that stopped
@@ -177,7 +188,7 @@ func (s *Session) fullSync(reason string) bool {
 		if !s.alive() {
 			return false
 		}
-		s.emitWindow(result.thread.LocalID, messageWindow, nil, true, true)
+		s.emitWindow(result.thread.LocalID, messageWindow, nil, true, true, 0)
 		refreshed++
 	}
 	for _, thread := range threads {
@@ -213,7 +224,7 @@ func (s *Session) fullSyncLocked(reason string) (threads []Conversation, results
 	if client == nil {
 		return nil, nil, nil, 0, false
 	}
-	convs, capped, err := s.listAllConversations(client)
+	convs, capped, err := s.listAllConversations(client, lifecycle)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("listing conversations failed")
 		s.fire(Event{Type: "error", Account: s.account, Message: "conversation sync failed"})
@@ -262,6 +273,10 @@ func (s *Session) fullSyncLocked(reason string) (threads []Conversation, results
 					skipped.Add(1)
 					continue
 				}
+				if !s.current(lifecycle) {
+					skipped.Add(1)
+					continue
+				}
 				s.mu.Lock()
 				s.metas[conv.GetConversationID()] = meta
 				s.mu.Unlock()
@@ -278,6 +293,12 @@ func (s *Session) fullSyncLocked(reason string) (threads []Conversation, results
 		if result.ok {
 			threads = append(threads, result.thread)
 		}
+	}
+	if !s.current(lifecycle) {
+		// A relogin retired this sync while it worked: drop the
+		// whole result instead of publishing old-account state
+		// into the new login.
+		return nil, nil, nil, lifecycle, false
 	}
 	// Only a demonstrably complete listing may close as authoritative.
 	// A capped page or a skipped thread means threads are missing:
@@ -363,7 +384,7 @@ func (s *Session) emitConversations(threads []Conversation, generation uint64, a
 // emitMessages sends one window in size-bounded chunks. The closing
 // chunk carries the authority flag and the cursor, so multi-chunk
 // windows reconcile once instead of dropping later chunks' messages.
-func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorNext string) {
+func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorNext string, fetchID uint64) {
 	if len(msgs) == 0 {
 		s.fire(Event{Type: "messages", Account: s.account, Conversation: convID,
 			Messages: []Message{}, Full: full, PageComplete: true})
@@ -388,7 +409,7 @@ func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorN
 	for i, chunk := range chunks {
 		last := i == len(chunks)-1
 		evt := Event{Type: "messages", Account: s.account, Conversation: convID,
-			Messages: chunk, Full: full && last, Generation: generation}
+			Messages: chunk, Full: full && last, Generation: generation, FetchID: fetchID}
 		if last {
 			evt.CursorNext = cursorNext
 			evt.PageComplete = true
@@ -417,7 +438,7 @@ func mintCursor(id string, ts int64) string {
 
 // emitWindow pages one thread window and emits it. full=false pages merge
 // downstream; the daemon reconciles only full sync windows.
-func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, download bool) {
+func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, download bool, fetchID uint64) {
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
@@ -445,23 +466,27 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	lifecycle := s.currentLifecycle()
 	resp, err := client.FetchMessages(ctx, convID, int64(limit), rpcCursor)
 	if err != nil {
 		s.log.Warn().Str("conversation", convID).Msg("fetching history failed")
-		s.fire(Event{Type: "error", Account: s.account, Message: "history fetch failed"})
+		s.fireIfCurrent(lifecycle, Event{Type: "error", Account: s.account, Message: "history fetch failed"})
 		return
 	}
 	var out []Message
 	for _, msg := range resp.GetMessages() {
-		mapped, removed := s.mapMessage(convID, msg, download)
+		mapped, removed := s.mapMessage(convID, msg, download, lifecycle)
 		if removed != "" {
-			s.fire(Event{Type: "message_removed", Account: s.account,
+			s.fireIfCurrent(lifecycle, Event{Type: "message_removed", Account: s.account,
 				Conversation: convID, Message: removed})
 			continue
 		}
 		if mapped != nil {
 			out = append(out, *mapped)
 		}
+	}
+	if !s.current(lifecycle) {
+		return
 	}
 	evtCursor := ""
 	if relayCursor := resp.GetCursor(); relayCursor != nil && relayCursor.GetLastItemID() != "" {
@@ -476,13 +501,16 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, 
 		}
 		evtCursor = mintCursor(oldest.LocalID, ts)
 	}
-	s.emitMessages(convID, out, full, evtCursor)
+	if !s.current(lifecycle) {
+		return
+	}
+	s.emitMessages(convID, out, full, evtCursor, fetchID)
 }
 
 // handleMessage processes one live relay message: tombstones are skipped,
 // deletions become removals, content becomes upserts, and own-message
 // statuses become lifecycle events.
-func (s *Session) handleMessage(msg *gmproto.Message, isOld bool) {
+func (s *Session) handleMessage(msg *gmproto.Message, isOld bool, lifecycle uint64) {
 	if msg == nil {
 		return
 	}
@@ -493,37 +521,45 @@ func (s *Session) handleMessage(msg *gmproto.Message, isOld bool) {
 	}
 	if isDeletion(status) {
 		if msg.GetMessageID() != "" {
-			s.fire(Event{Type: "message_removed", Account: s.account,
+			s.fireIfCurrent(lifecycle, Event{Type: "message_removed", Account: s.account,
 				Conversation: convID, Message: msg.GetMessageID()})
 		}
 		return
 	}
-	mapped, removed := s.mapMessage(convID, msg, true)
+	mapped, removed := s.mapMessage(convID, msg, true, lifecycle)
 	if removed != "" {
-		s.fire(Event{Type: "message_removed", Account: s.account,
+		s.fireIfCurrent(lifecycle, Event{Type: "message_removed", Account: s.account,
 			Conversation: convID, Message: removed})
 		return
 	}
 	if mapped == nil {
 		return
 	}
-	s.fire(Event{Type: "messages", Account: s.account, Conversation: convID,
+	if !s.current(lifecycle) {
+		return
+	}
+	s.fireIfCurrent(lifecycle, Event{Type: "messages", Account: s.account, Conversation: convID,
 		Messages: []Message{*mapped}})
 	// Remote echoes are authoritative even when the relay's sender field
 	// uses an alias not present in selfIDs. Correlate pending sends before
 	// applying the self-sender heuristic so late send statuses are not lost.
-	s.checkPending(msg)
+	s.checkPending(msg, lifecycle)
 	if s.isSelfSender(convID, msg) {
 		if token, ok := mapStatus(status); ok {
-			s.fire(Event{Type: "status", Account: s.account,
+			s.fireIfCurrent(lifecycle, Event{Type: "status", Account: s.account,
 				Conversation: convID, Message: msg.GetMessageID(), Status: token})
 		}
 	}
 }
 
 // checkPending correlates relay echoes of our sends by transaction id.
-func (s *Session) checkPending(msg *gmproto.Message) {
+// The lifecycle gate keeps a stale echo from consuming a newer
+// session's pending entry.
+func (s *Session) checkPending(msg *gmproto.Message, lifecycle uint64) {
 	if msg.GetTmpID() == "" {
+		return
+	}
+	if !s.current(lifecycle) {
 		return
 	}
 	s.mu.Lock()
