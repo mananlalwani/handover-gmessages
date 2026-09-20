@@ -73,10 +73,9 @@ func (s *Session) Login(bundle []byte) {
 	}
 	auth := libgm.NewAuthData()
 	auth.SetCookies(parsed.Cookies)
-	if err := s.store.SaveAuth(s.account, auth); err != nil {
-		s.fire(Event{Type: "error", Account: s.account, Message: "storing session failed"})
-		return
-	}
+	// Persist only after pairing succeeds (see finishPairing). Saving
+	// now would leave a partial session on disk that Restore treats
+	// as a real session when pairing later fails.
 	s.mu.Lock()
 	if s.pairCancel != nil {
 		s.pairCancel()
@@ -721,17 +720,30 @@ func (s *Session) Logout() bool {
 		client.Disconnect()
 	}
 	if err := s.store.DeleteAuth(s.account); err != nil {
+		// The remote side is already revoked and the client is
+		// disconnected, so tear down the live state and say so: the
+		// daemon must see this account go offline, not stay
+		// authenticated. Only the on-disk deletion is left to heal
+		// (the next save overwrites it).
+		s.teardown()
+		s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
+			Connected: false, Authenticated: false})
 		s.fire(Event{Type: "error", Account: s.account, Message: "deleting session failed"})
 		return false
 	}
+	s.teardown()
+	s.fire(Event{Type: "account_removed", Account: s.account})
+	return true
+}
+
+// teardown drops the live relay state without touching storage.
+func (s *Session) teardown() {
 	s.mu.Lock()
 	s.client = nil
 	s.auth = nil
 	s.connected = false
 	s.authenticated = false
 	s.mu.Unlock()
-	s.fire(Event{Type: "account_removed", Account: s.account})
-	return true
 }
 
 // Close stops background loops. It does not delete stored sessions:

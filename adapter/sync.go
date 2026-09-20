@@ -102,6 +102,11 @@ func (s *Session) listPage(client *libgm.Client, cursor *gmproto.Cursor) (*gmpro
 // first page, so capped threads converge over successive syncs.
 const maxSyncPages = 10
 
+// recentWindowRefresh bounds post-sync window healing: the newest
+// threads get a full window re-emit so dropped messages and deletions
+// converge without fanning hundreds of RPCs at the relay.
+const recentWindowRefresh = 10
+
 // listAllConversations pages the whole inbox. A single page is never
 // treated as authoritative for a large library: accounts with more
 // threads than one page would otherwise lose older conversations from
@@ -187,11 +192,18 @@ func (s *Session) fullSync(reason string) bool {
 		ok     bool
 	}
 	results := make([]threadResult, len(convs))
+	// Bounded worker pool, not one goroutine per thread: a large
+	// library plus per-thread fallback RPCs would otherwise recreate
+	// the relay starvation this design avoids. Mapping is CPU-light;
+	// the semaphore guards the fallback phone round-trips.
+	sem := make(chan struct{}, syncWorkers)
 	var wg sync.WaitGroup
 	for i, conv := range convs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			// ListConversations already returns the authoritative conversation
 			// record. Upstream maps that record directly; doing a GetConversation
 			// RPC for every thread fans one sync into dozens of phone requests
@@ -224,6 +236,20 @@ func (s *Session) fullSync(reason string) bool {
 		}
 	}
 	s.emitConversations(threads, s.nextGeneration())
+	// Heal message windows for the most recently active threads.
+	// Live events and explicit history fetches cover the rest, but a
+	// queue overflow or a missed suspend gap can drop messages and
+	// deletions with no other recovery path. Sequential and bounded:
+	// one window RPC at a time, newest threads first, so the relay
+	// never faces the fan-out this design avoids elsewhere.
+	refreshed := 0
+	for _, result := range results {
+		if !result.ok || refreshed >= recentWindowRefresh {
+			continue
+		}
+		s.emitWindow(result.thread.LocalID, messageWindow, nil, true, true)
+		refreshed++
+	}
 	// Do not fetch a message window for every thread during account sync.
 	// A large library can contain hundreds of conversations, and issuing
 	// hundreds of concurrent phone RPCs starves the relay and makes sends

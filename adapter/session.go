@@ -35,6 +35,10 @@ const (
 	eventQueue       = 256
 )
 
+// syncWorkers caps concurrent per-thread mapping during a sync. See
+// fullSync: the semaphore covers the fallback phone round-trips.
+const syncWorkers = 8
+
 // Session owns one Google account's relay state: the libgm client, SIM
 // and thread metadata, message caches, and pending-send correlation.
 // Google types never leave this file's boundary except as mapped wire
@@ -447,6 +451,19 @@ func (s *Session) handleRelayEvent(evt any) {
 		s.mu.Unlock()
 		if changed {
 			s.log.Debug().Int("sims", len(evt.GetSIMCards())).Msg("relay identity updated")
+		}
+	case *events.AuthTokenRefreshed:
+		// libgm refreshes auth tokens in the background. Persist on
+		// every refresh: a restart between refresh and the next
+		// unrelated save would otherwise resurrect a stale token.
+		s.mu.Lock()
+		auth := s.auth
+		s.mu.Unlock()
+		if auth == nil {
+			break
+		}
+		if err := s.store.SaveAuth(s.account, auth); err != nil {
+			s.log.Warn().Err(err).Msg("persisting refreshed session failed")
 		}
 	case *events.GaiaLoggedOut:
 		s.log.Warn().Msg("relay reported logout")

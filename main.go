@@ -166,22 +166,30 @@ func (h *hub) dispatch(cmd adapter.Command) {
 			h.write(adapter.Event{Type: "error", Account: cmd.Account, Message: "login bundle rejected"})
 			return
 		}
-		h.session(cmd.Account).Login(bundle)
+		// Pairing runs for minutes. Never hold the command loop for
+		// it: shutdown and other commands must stay responsive.
+		account := cmd.Account
+		go h.session(account).Login(bundle)
 	case "logout":
 		if !validAccount(cmd.Account) {
 			return
 		}
 		// Only forget the session when the revoke actually tore it
 		// down. Forgetting after a failed revoke would disconnect a
-		// live session while the daemon believes access ended.
-		if h.session(cmd.Account).Logout() {
-			h.forget(cmd.Account)
-		}
+		// live session while the daemon believes access ended. The
+		// revoke runs async so a hung phone cannot trap the loop.
+		account := cmd.Account
+		go func() {
+			if h.session(account).Logout() {
+				h.forget(account)
+			}
+		}()
 	case "list_conversations", "sync":
 		if !validAccount(cmd.Account) {
 			return
 		}
-		h.session(cmd.Account).Sync()
+		account := cmd.Account
+		go h.session(account).Sync()
 	case "fetch_history":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" {
 			return
@@ -219,12 +227,14 @@ func (h *hub) dispatch(cmd adapter.Command) {
 		if !validAccount(cmd.Account) || cmd.Conversation == "" {
 			return
 		}
-		h.session(cmd.Account).MarkRead(cmd.Conversation, cmd.Message)
+		account, conversation, message := cmd.Account, cmd.Conversation, cmd.Message
+		go h.session(account).MarkRead(conversation, message)
 	case "typing":
 		if !validAccount(cmd.Account) || cmd.Conversation == "" {
 			return
 		}
-		h.session(cmd.Account).Typing(cmd.Conversation)
+		account, conversation := cmd.Account, cmd.Conversation
+		go h.session(account).Typing(conversation)
 	case "delete_message":
 		if !validAccount(cmd.Account) || cmd.RequestID == "" {
 			return
