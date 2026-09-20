@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Handover contributors
 // SPDX-License-Identifier: AGPL-3.0-only
-// Command handover-gmessages-adapter speaks the Handover helper IPC v1
+// Command handover-gmessages speaks the Handover helper IPC v1
 // contract on stdin/stdout and drives the real Google Messages companion
 // service through upstream libgm.
 //
@@ -26,7 +26,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-const adapterName = "handover-gmessages-adapter/libgm"
+const adapterName = "handover-gmessages/libgm"
 
 func main() {
 	level := zerolog.InfoLevel

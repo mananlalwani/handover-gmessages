@@ -21,13 +21,13 @@ Build the adapter with Go:
 ```sh
 git clone https://github.com/mananlalwani/handover-gmessages.git
 cd handover-gmessages
-go build -o handover-gmessages-adapter .
+go build -o handover-gmessages .
 ```
 
 Point Handover at the binary:
 
 ```sh
-export HANDOVER_GMESSAGES_HELPER=/path/to/handover-gmessages-adapter
+export HANDOVER_GMESSAGES_HELPER=/path/to/handover-gmessages
 ```
 
 Handover starts and supervises the adapter. You do not need to pass account

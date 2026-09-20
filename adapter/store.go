@@ -38,7 +38,7 @@ func NewStore() (*Store, error) {
 	if !filepath.IsAbs(base) {
 		base, _ = filepath.Abs(base)
 	}
-	return &Store{dir: filepath.Join(base, "handover", "gmessages-adapter")}, nil
+	return &Store{dir: filepath.Join(base, "handover", "gmessages")}, nil
 }
 
 func (s *Store) accountFile(account string) (string, bool) {

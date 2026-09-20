@@ -1,4 +1,4 @@
-handover-gmessages-adapter
+handover-gmessages
 AGENTS.md
 # Session state and credentials must never be tracked
 *.session.json

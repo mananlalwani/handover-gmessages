@@ -27,7 +27,7 @@ go build ./...
 For a local Handover run, build the binary and set:
 
 ```sh
-export HANDOVER_GMESSAGES_HELPER=$PWD/handover-gmessages-adapter
+export HANDOVER_GMESSAGES_HELPER=$PWD/handover-gmessages
 ```
 
 Use a test account and a conversation whose participants have agreed to the

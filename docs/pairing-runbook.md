@@ -44,7 +44,7 @@ to a real recipient.
    required cookies. The converter preserves every cookie it captures because
    Google may require additional cookies for a particular account or session.
    It validates the six minimum names, and the adapter stores the resulting
-   session under `${XDG_STATE_HOME:-~/.local/state}/handover/gmessages-adapter`.
+   session under `${XDG_STATE_HOME:-~/.local/state}/handover/gmessages`.
    Remove any source file immediately after login. The bundle must never appear
    in argv, shell history, logs, or a committed file.
 4. Confirm the matching emoji in Google Messages when prompted.

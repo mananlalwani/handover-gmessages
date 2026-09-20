@@ -18,7 +18,7 @@ func testAuth() *libgm.AuthData {
 
 func TestStoreRoundTripWithStrictPermissions(t *testing.T) {
 	dir := t.TempDir()
-	store := &Store{dir: filepath.Join(dir, "handover", "gmessages-adapter")}
+	store := &Store{dir: filepath.Join(dir, "handover", "gmessages")}
 	auth := testAuth()
 	if err := store.SaveAuth("work", auth); err != nil {
 		t.Fatalf("save: %v", err)

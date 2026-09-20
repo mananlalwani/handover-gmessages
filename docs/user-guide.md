@@ -21,7 +21,7 @@ Messages API.
 Point Handover at the adapter binary:
 
 ```sh
-export HANDOVER_GMESSAGES_HELPER=/path/to/handover-gmessages-adapter
+export HANDOVER_GMESSAGES_HELPER=/path/to/handover-gmessages
 ```
 
 If Handover runs as a systemd user service, add the variable to the service's
