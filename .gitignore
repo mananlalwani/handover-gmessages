@@ -1,2 +1,16 @@
 handover-gmessages-adapter
 AGENTS.md
+# Session state and credentials must never be tracked
+*.session.json
+*.db
+*.sqlite
+.env
+*.key
+*.pem
+# Go build and test artifacts
+*.test
+*.out
+dist/
+# Editor directories
+.idea/
+.vscode/
