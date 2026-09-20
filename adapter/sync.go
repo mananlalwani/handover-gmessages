@@ -188,7 +188,7 @@ func (s *Session) fullSync(reason string) bool {
 		if !s.current(lifecycle) {
 			return false
 		}
-		s.emitWindow(result.thread.LocalID, messageWindow, nil, true, true, 0)
+		s.emitWindow(result.thread.LocalID, messageWindow, nil, true, true, 0, lifecycle)
 		refreshed++
 	}
 	for _, thread := range threads {
@@ -444,12 +444,19 @@ func mintCursor(id string, ts int64) string {
 
 // emitWindow pages one thread window and emits it. full=false pages merge
 // downstream; the daemon reconciles only full sync windows.
-func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, download bool, fetchID uint64) {
+func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, download bool, fetchID uint64, expectedLifecycle ...uint64) {
 	s.mu.Lock()
 	client := s.client
+	lifecycle := s.lifecycle
+	if len(expectedLifecycle) > 0 {
+		lifecycle = expectedLifecycle[0]
+	}
 	s.mu.Unlock()
 	if client == nil {
-		s.fire(Event{Type: "error", Account: s.account, Message: "not connected"})
+		s.fireIfCurrent(lifecycle, Event{Type: "error", Account: s.account, Message: "not connected"})
+		return
+	}
+	if !s.ownsClient(lifecycle, client) {
 		return
 	}
 	var rpcCursor *gmproto.Cursor
@@ -463,7 +470,7 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, 
 			id = *cursor
 			ts = s.cachedTS(convID, id)
 			if id == "" || ts == 0 {
-				s.fire(Event{Type: "error", Account: s.account, Message: "unknown history cursor"})
+				s.fireIfCurrent(lifecycle, Event{Type: "error", Account: s.account, Message: "unknown history cursor"})
 				return
 			}
 			ts /= 1000
@@ -472,11 +479,13 @@ func (s *Session) emitWindow(convID string, limit uint32, cursor *string, full, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	lifecycle := s.currentLifecycle()
 	resp, err := client.FetchMessages(ctx, convID, int64(limit), rpcCursor)
 	if err != nil {
 		s.log.Warn().Str("conversation", convID).Msg("fetching history failed")
 		s.fireIfCurrent(lifecycle, Event{Type: "error", Account: s.account, Message: "history fetch failed"})
+		return
+	}
+	if !s.ownsClient(lifecycle, client) {
 		return
 	}
 	var out []Message
