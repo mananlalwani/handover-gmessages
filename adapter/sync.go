@@ -185,15 +185,21 @@ func (s *Session) fullSync(reason string) bool {
 		if !result.ok || refreshed >= recentWindowRefresh {
 			continue
 		}
-		if !s.alive() {
+		if !s.current(lifecycle) {
 			return false
 		}
 		s.emitWindow(result.thread.LocalID, messageWindow, nil, true, true, 0)
 		refreshed++
 	}
 	for _, thread := range threads {
-		s.fire(Event{Type: "read", Account: s.account, Conversation: thread.LocalID,
+		if !s.current(lifecycle) {
+			return false
+		}
+		s.fireIfCurrent(lifecycle, Event{Type: "read", Account: s.account, Conversation: thread.LocalID,
 			Unread: unreads[thread.LocalID]})
+	}
+	if !s.current(lifecycle) {
+		return false
 	}
 	if err := s.saveAuthIfCurrent(lifecycle); err != nil {
 		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
@@ -387,7 +393,7 @@ func (s *Session) emitConversations(threads []Conversation, generation uint64, a
 func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorNext string, fetchID uint64) {
 	if len(msgs) == 0 {
 		s.fire(Event{Type: "messages", Account: s.account, Conversation: convID,
-			Messages: []Message{}, Full: full, PageComplete: true})
+			Messages: []Message{}, Full: full, PageComplete: true, FetchID: fetchID})
 		return
 	}
 	var chunks [][]Message

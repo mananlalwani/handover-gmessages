@@ -484,13 +484,25 @@ func (s *Session) removeStagedSource(path string) {
 	if !withinDir(path, staged) && !withinDir(path, daemonStagingDir()) {
 		return
 	}
-	os.Remove(path)
+	_ = os.Remove(path)
+	parent := filepath.Dir(path)
+	if withinPath(parent, staged) || withinPath(parent, daemonStagingDir()) {
+		_ = os.Remove(parent)
+	}
 }
 
 // withinDir reports whether path resolves inside dir. Symlinks never
 // match: the reader only deletes what it validated as a regular
 // file at a literal staging path.
 func withinDir(path, dir string) bool {
+	if !withinPath(path, dir) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func withinPath(path, dir string) bool {
 	if dir == "" {
 		return false
 	}
@@ -500,9 +512,6 @@ func withinDir(path, dir string) bool {
 	}
 	rel, err := filepath.Rel(dir, abs)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	if info, err := os.Lstat(abs); err != nil || !info.Mode().IsRegular() {
 		return false
 	}
 	return true

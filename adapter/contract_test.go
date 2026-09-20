@@ -274,6 +274,12 @@ func TestChunkedEmissionStaysUnderBound(t *testing.T) {
 			t.Errorf("chunk %d must merge", i)
 		}
 	}
+
+	got = nil
+	sess.emitMessages("c", nil, false, "", 99)
+	if len(got) != 1 || got[0].FetchID != 99 || !got[0].PageComplete {
+		t.Fatalf("empty history page lost fetch identity: %#v", got)
+	}
 }
 
 func TestSanitizeText(t *testing.T) {

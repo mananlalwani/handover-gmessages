@@ -517,6 +517,7 @@ func (s *Session) connectLoop(ctx context.Context) {
 func (s *Session) connectOnce(ctx context.Context) error {
 	s.mu.Lock()
 	client := s.client
+	lifecycle := s.lifecycle
 	s.mu.Unlock()
 	if client == nil {
 		return fmt.Errorf("no client")
@@ -526,6 +527,9 @@ func (s *Session) connectOnce(ctx context.Context) error {
 	if err := client.FetchConfig(timeout); err != nil {
 		return err
 	}
+	if !s.ownsClient(lifecycle, client) {
+		return context.Canceled
+	}
 	// Connect starts libgm's long-poll loop asynchronously. Do not pass the
 	// short setup timeout here: cancelling it when this function returns
 	// immediately kills the receive loop and leaves the account falsely
@@ -533,13 +537,20 @@ func (s *Session) connectOnce(ctx context.Context) error {
 	if err := client.Connect(ctx); err != nil {
 		return err
 	}
+	if !s.ownsClient(lifecycle, client) {
+		return context.Canceled
+	}
 	s.mu.Lock()
+	if s.lifecycle != lifecycle || s.client != client || !s.alive() {
+		s.mu.Unlock()
+		return context.Canceled
+	}
 	s.connected = true
 	s.authenticated = true
 	s.mu.Unlock()
-	s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
+	s.fireIfCurrent(lifecycle, Event{Type: "account", Account: s.account, Label: "Google Messages",
 		Connected: true, Authenticated: true})
-	if err := s.saveAuthIfCurrent(s.currentLifecycle()); err != nil {
+	if err := s.saveAuthIfCurrent(lifecycle); err != nil {
 		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
 	}
 	// libgm's postConnect callback activates the phone session asynchronously
@@ -551,6 +562,9 @@ func (s *Session) connectOnce(ctx context.Context) error {
 			timer := time.NewTimer(delay)
 			select {
 			case <-timer.C:
+				if !s.current(lifecycle) {
+					return
+				}
 				if s.fullSync("connect") {
 					return
 				}
@@ -564,6 +578,12 @@ func (s *Session) connectOnce(ctx context.Context) error {
 		}
 	}()
 	return nil
+}
+
+func (s *Session) ownsClient(lifecycle uint64, client *libgm.Client) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lifecycle == lifecycle && s.client == client && s.alive()
 }
 
 func isFatalAuth(err error) bool {
@@ -622,11 +642,18 @@ func (s *Session) handleRelayEvent(evt any, lifecycle uint64) {
 		if evt.GetType() == gmproto.TypingTypes_STARTED_TYPING && evt.GetUser().GetNumber() != "" {
 			participants = append(participants, evt.GetUser().GetNumber())
 		}
-		s.fire(Event{Type: "typing", Account: s.account,
+		s.fireIfCurrent(lifecycle, Event{Type: "typing", Account: s.account,
 			Conversation: evt.GetConversationID(), Participants: participants})
 	case *gmproto.Settings:
+		if !s.current(lifecycle) {
+			return
+		}
 		changed := false
 		s.mu.Lock()
+		if s.lifecycle != lifecycle {
+			s.mu.Unlock()
+			return
+		}
 		for _, sim := range evt.GetSIMCards() {
 			id := sim.GetSIMParticipant().GetID()
 			if id == "" {
@@ -639,6 +666,9 @@ func (s *Session) handleRelayEvent(evt any, lifecycle uint64) {
 			}
 		}
 		s.mu.Unlock()
+		if !s.current(lifecycle) {
+			return
+		}
 		if changed {
 			s.log.Debug().Int("sims", len(evt.GetSIMCards())).Msg("relay identity updated")
 		}
@@ -652,30 +682,41 @@ func (s *Session) handleRelayEvent(evt any, lifecycle uint64) {
 		if auth == nil {
 			break
 		}
-		if err := s.saveAuthIfCurrent(s.currentLifecycle()); err != nil {
+		if err := s.saveAuthIfCurrent(lifecycle); err != nil {
 			s.log.Warn().Err(err).Msg("persisting refreshed session failed")
 		}
 	case *events.GaiaLoggedOut:
 		s.log.Warn().Msg("relay reported logout")
 		s.mu.Lock()
+		if s.lifecycle != lifecycle {
+			s.mu.Unlock()
+			return
+		}
 		s.connected = false
 		s.authenticated = false
 		s.mu.Unlock()
-		s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
+		s.fireIfCurrent(lifecycle, Event{Type: "account", Account: s.account, Label: "Google Messages",
 			Connected: false, Authenticated: false})
-		s.fire(Event{Type: "error", Account: s.account, Message: "session logged out by Google, re-pair required"})
+		s.fireIfCurrent(lifecycle, Event{Type: "error", Account: s.account, Message: "session logged out by Google, re-pair required"})
 	case *events.ListenFatalError:
 		s.log.Warn().Err(evt.Error).Msg("relay fatal error")
+		if !s.current(lifecycle) {
+			return
+		}
 		if isFatalAuth(evt.Error) {
 			s.mu.Lock()
+			if s.lifecycle != lifecycle {
+				s.mu.Unlock()
+				return
+			}
 			s.connected = false
 			s.authenticated = false
 			s.mu.Unlock()
-			s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
+			s.fireIfCurrent(lifecycle, Event{Type: "account", Account: s.account, Label: "Google Messages",
 				Connected: false, Authenticated: false})
-			s.fire(Event{Type: "error", Account: s.account, Message: "session expired, re-pair required"})
+			s.fireIfCurrent(lifecycle, Event{Type: "error", Account: s.account, Message: "session expired, re-pair required"})
 		} else {
-			s.fire(Event{Type: "error", Account: s.account, Message: "relay connection lost, retrying"})
+			s.fireIfCurrent(lifecycle, Event{Type: "error", Account: s.account, Message: "relay connection lost, retrying"})
 		}
 	case *events.AccountChange:
 		s.log.Debug().Msg("relay account change ignored")
