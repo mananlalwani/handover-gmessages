@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Handover contributors
+// SPDX-License-Identifier: AGPL-3.0-only
 // Package adapter implements the Handover helper IPC v1 contract against
 // upstream libgm (go.mau.fi/mautrix-gmessages, AGPL-3.0-only).
 //

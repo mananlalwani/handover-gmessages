@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Handover contributors
+// SPDX-License-Identifier: AGPL-3.0-only
 // Command handover-gmessages-adapter speaks the Handover helper IPC v1
 // contract on stdin/stdout and drives the real Google Messages companion
 // service through upstream libgm.
