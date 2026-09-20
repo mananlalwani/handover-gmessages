@@ -77,16 +77,20 @@ type Session struct {
 	// connectCancel stops the previous reconnect loop before a new
 	// one starts, so re-login never leaves two loops racing.
 	connectCancel context.CancelFunc
-	// generation is a monotonic session fence with two jobs. It
-	// groups multi-chunk sync emissions (see sync.go) and it retires
-	// one login session against the next: login, logout, and close
-	// bump it, while persistence, pairing completion, and queued
-	// relay events carry the generation they started with and are
+	// lifecycle is the login-session fence: login, logout, and
+	// close bump it, while persistence, pairing completion, and
+	// queued relay events carry the value they started with and are
 	// dropped when it no longer matches. Without this, a stale sync
 	// could recreate a session file logout deleted, an old pairing
 	// could persist a newer login's auth, or backlogged events could
-	// mutate the new session's state.
-	generation uint64
+	// mutate the new session's state. It is deliberately separate
+	// from syncGen below: routine syncs must never retire queued
+	// events or invalidate in-flight saves.
+	lifecycle uint64
+	// syncGen groups multi-chunk sync emissions (see sync.go). It
+	// carries no lifecycle meaning and must never gate persistence
+	// or event delivery.
+	syncGen uint64
 	// resyncing serializes queue-overflow recovery: one catch-up
 	// runs at a time no matter how many overflows fire.
 	resyncing atomic.Bool
@@ -95,12 +99,12 @@ type Session struct {
 	authenticated bool
 }
 
-// queuedEvent pairs a relay event with the session generation that
+// queuedEvent pairs a relay event with the login lifecycle that
 // enqueued it. The consumer rechecks at dequeue: backlogged events
 // from an old login must not mutate the new session's state.
 type queuedEvent struct {
-	generation uint64
-	event      any
+	lifecycle uint64
+	event     any
 }
 
 type cachedMessage struct {
@@ -220,12 +224,12 @@ func (s *Session) buildClient(auth *libgm.AuthData) {
 	s.client.SetEventHandler(func(evt any) {
 		s.mu.Lock()
 		current := s.clientGen == gen
-		sessionGen := s.generation
+		sessionGen := s.lifecycle
 		s.mu.Unlock()
 		if !current {
 			return
 		}
-		queued := queuedEvent{generation: sessionGen, event: evt}
+		queued := queuedEvent{lifecycle: sessionGen, event: evt}
 		select {
 		case s.events <- queued:
 		default:
@@ -340,34 +344,34 @@ func (s *Session) alive() bool {
 	}
 }
 
-// bumpGeneration retires the current login session: queued events,
-// in-flight pairing, and pending saves from the old generation stop
+// bumpLifecycle retires the current login session: queued events,
+// in-flight pairing, and pending saves from the old lifecycle stop
 // applying. Callers hold no locks; this takes its own.
-func (s *Session) bumpGeneration() uint64 {
+func (s *Session) bumpLifecycle() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.generation++
-	if s.generation == 0 {
-		s.generation = 1
+	s.lifecycle++
+	if s.lifecycle == 0 {
+		s.lifecycle = 1
 	}
-	return s.generation
+	return s.lifecycle
 }
 
-// currentGeneration reads the session generation under lock.
-func (s *Session) currentGeneration() uint64 {
+// currentLifecycle reads the login lifecycle under lock.
+func (s *Session) currentLifecycle() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.generation
+	return s.lifecycle
 }
 
-// saveAuthIfCurrent persists auth only when the caller's generation
+// saveAuthIfCurrent persists auth only when the caller's lifecycle
 // is still current and auth is present. A stale sync must never
 // recreate a session file logout deleted, and teardown must never
 // persist a nil auth as JSON null.
-func (s *Session) saveAuthIfCurrent(generation uint64) error {
+func (s *Session) saveAuthIfCurrent(lifecycle uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if generation != s.generation || s.auth == nil {
+	if lifecycle != s.lifecycle || s.auth == nil {
 		return nil
 	}
 	return s.store.SaveAuth(s.account, s.auth)
@@ -486,7 +490,7 @@ func (s *Session) connectOnce(ctx context.Context) error {
 	s.mu.Unlock()
 	s.fire(Event{Type: "account", Account: s.account, Label: "Google Messages",
 		Connected: true, Authenticated: true})
-	if err := s.saveAuthIfCurrent(s.currentGeneration()); err != nil {
+	if err := s.saveAuthIfCurrent(s.currentLifecycle()); err != nil {
 		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
 	}
 	// libgm's postConnect callback activates the phone session asynchronously
@@ -527,7 +531,7 @@ func (s *Session) eventLoop() {
 			// Recheck at dequeue: backlogged events from an old
 			// login must not mutate the new session's state.
 			s.mu.Lock()
-			current := s.generation == queued.generation
+			current := s.lifecycle == queued.lifecycle
 			s.mu.Unlock()
 			if !current {
 				continue
@@ -593,7 +597,7 @@ func (s *Session) handleRelayEvent(evt any) {
 		if auth == nil {
 			break
 		}
-		if err := s.saveAuthIfCurrent(s.currentGeneration()); err != nil {
+		if err := s.saveAuthIfCurrent(s.currentLifecycle()); err != nil {
 			s.log.Warn().Err(err).Msg("persisting refreshed session failed")
 		}
 	case *events.GaiaLoggedOut:

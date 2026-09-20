@@ -162,22 +162,62 @@ func (s *Session) listAllConversations(client *libgm.Client) ([]*gmproto.Convers
 // never aborts the sync.
 func (s *Session) fullSync(reason string) bool {
 	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
-	if !s.alive() {
+	threads, results, unreads, lifecycle, complete := s.fullSyncLocked(reason)
+	s.syncMu.Unlock()
+	if threads == nil && results == nil {
 		return false
 	}
-	generation := s.currentGeneration()
+	// Window healing runs unlocked (see fullSyncLocked): slow phones
+	// must not stall other syncs behind sequential window RPCs.
+	refreshed := 0
+	for _, result := range results {
+		if !result.ok || refreshed >= recentWindowRefresh {
+			continue
+		}
+		if !s.alive() {
+			return false
+		}
+		s.emitWindow(result.thread.LocalID, messageWindow, nil, true, true)
+		refreshed++
+	}
+	for _, thread := range threads {
+		s.fire(Event{Type: "read", Account: s.account, Conversation: thread.LocalID,
+			Unread: unreads[thread.LocalID]})
+	}
+	if err := s.saveAuthIfCurrent(lifecycle); err != nil {
+		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
+	}
+	s.log.Debug().Str("reason", reason).Int("threads", len(threads)).Msg("sync complete")
+	return complete || len(threads) > 0
+}
+
+type threadResult struct {
+	index  int
+	thread Conversation
+	unread bool
+	ok     bool
+}
+
+// fullSyncLocked performs the serialized half of a sync: listing,
+// mapping, and conversation emission. Window healing runs after the
+// caller releases syncMu so one slow phone cannot stall every other
+// sync behind up to ten sequential window RPCs.
+func (s *Session) fullSyncLocked(reason string) (threads []Conversation, results []threadResult, unreads map[string]bool, lifecycle uint64, complete bool) {
+	if !s.alive() {
+		return nil, nil, nil, 0, false
+	}
+	lifecycle = s.currentLifecycle()
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
 	if client == nil {
-		return false
+		return nil, nil, nil, 0, false
 	}
 	convs, capped, err := s.listAllConversations(client)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("listing conversations failed")
 		s.fire(Event{Type: "error", Account: s.account, Message: "conversation sync failed"})
-		return false
+		return nil, nil, nil, 0, false
 	}
 	// Google returns the inbox as a broad thread library, and ordering is
 	// not stable across sync responses. Present the same useful ordering as
@@ -186,14 +226,8 @@ func (s *Session) fullSync(reason string) bool {
 		return convs[i].GetLastMessageTimestamp() >
 			convs[j].GetLastMessageTimestamp()
 	})
-	var threads []Conversation
-	type threadResult struct {
-		index  int
-		thread Conversation
-		unread bool
-		ok     bool
-	}
-	results := make([]threadResult, len(convs))
+	threads = nil
+	results = make([]threadResult, len(convs))
 	// Fixed worker pool: one goroutine per thread would park up to
 	// two thousand goroutines on the semaphore for a large library.
 	// Eight workers pull indices; the pool also bounds the fallback
@@ -249,45 +283,22 @@ func (s *Session) fullSync(reason string) bool {
 	// A capped page or a skipped thread means threads are missing:
 	// merging without reconcile keeps them instead of deleting live
 	// state the daemon still holds.
-	complete := !capped && skipped.Load() == 0
+	complete = !capped && skipped.Load() == 0
 	if !complete {
 		s.log.Warn().Bool("capped", capped).Int32("skipped", skipped.Load()).Msg("sync incomplete; merging without reconcile")
 	}
 	s.emitConversations(threads, s.nextGeneration(), complete)
-	// Heal message windows for the most recently active threads.
-	// Live events and explicit history fetches cover the rest, but a
-	// queue overflow or a missed suspend gap can drop messages and
-	// deletions with no other recovery path. Sequential and bounded:
-	// one window RPC at a time, newest threads first, so the relay
-	// never faces the fan-out this design avoids elsewhere.
-	refreshed := 0
-	for _, result := range results {
-		if !result.ok || refreshed >= recentWindowRefresh {
-			continue
-		}
-		s.emitWindow(result.thread.LocalID, messageWindow, nil, true, true)
-		refreshed++
-	}
-	// Do not fetch a message window for every thread during account sync.
-	// A large library can contain hundreds of conversations, and issuing
-	// hundreds of concurrent phone RPCs starves the relay and makes sends
-	// time out. History is fetched explicitly by the history command; live
-	// events continue to populate the current windows.
-	unreads := map[string]bool{}
+	// Do not fetch message windows under the sync lock (see
+	// fullSync): window healing continues after unlock. History is
+	// fetched explicitly by the history command; live events
+	// continue to populate the current windows.
+	unreads = map[string]bool{}
 	for _, result := range results {
 		if result.ok {
 			unreads[result.thread.LocalID] = result.unread
 		}
 	}
-	for _, thread := range threads {
-		s.fire(Event{Type: "read", Account: s.account, Conversation: thread.LocalID,
-			Unread: unreads[thread.LocalID]})
-	}
-	if err := s.saveAuthIfCurrent(generation); err != nil {
-		s.log.Warn().Err(err).Msg("persisting refreshed session failed")
-	}
-	s.log.Debug().Str("reason", reason).Int("threads", len(threads)).Msg("sync complete")
-	return true
+	return threads, results, unreads, lifecycle, complete
 }
 
 func (s *Session) threadUnread(convID string) bool {
@@ -299,15 +310,17 @@ func (s *Session) threadUnread(convID string) bool {
 }
 
 // nextGeneration mints a chunk-group id for one multi-chunk sync.
-// Generations start at 1; zero on the wire means ungrouped.
+// Generations start at 1; zero on the wire means ungrouped. This
+// counter is independent of the login lifecycle: minting emission
+// ids must never retire queued events or fence saves.
 func (s *Session) nextGeneration() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.generation++
-	if s.generation == 0 {
-		s.generation = 1
+	s.syncGen++
+	if s.syncGen == 0 {
+		s.syncGen = 1
 	}
-	return s.generation
+	return s.syncGen
 }
 
 // emitConversations sends the thread list in size-bounded chunks that

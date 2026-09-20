@@ -3,8 +3,11 @@
 package adapter
 
 import (
+	"os"
 	"testing"
 	"time"
+
+	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 )
 
 func TestWallClockJumpedOnlyAfterSuspendSizedGap(t *testing.T) {
@@ -45,5 +48,44 @@ func TestClosedSessionFiresNothing(t *testing.T) {
 	sess.fire(Event{Type: "error", Account: "a", Message: "late"})
 	if len(got) != 1 {
 		t.Error("closed session must drop late events")
+	}
+}
+
+func TestEmissionCounterIndependentOfLifecycle(t *testing.T) {
+	store := &Store{dir: t.TempDir()}
+	if err := store.ensureDir(); err != nil {
+		t.Fatal(err)
+	}
+	sess := &Session{account: "test", store: store, closed: make(chan struct{})}
+	lifecycle := sess.currentLifecycle()
+	// Routine sync emissions must not retire the login lifecycle:
+	// queued events stamped earlier and pending saves must survive.
+	sess.nextGeneration()
+	sess.nextGeneration()
+	if got := sess.currentLifecycle(); got != lifecycle {
+		t.Fatalf("emission bumped lifecycle: %d -> %d", lifecycle, got)
+	}
+	sess.auth = libgm.NewAuthData()
+	if err := sess.saveAuthIfCurrent(lifecycle); err != nil {
+		t.Fatalf("current-lifecycle save refused: %v", err)
+	}
+	path, ok := store.accountFile("test")
+	if !ok {
+		t.Fatal("test account must pass the storage gate")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("current-lifecycle save must persist, got %v", err)
+	}
+	// A stale lifecycle still saves nothing.
+	if err := sess.saveAuthIfCurrent(lifecycle + 1000); err != nil {
+		t.Fatalf("stale save must be a silent skip, got %v", err)
+	}
+	// Close retires the lifecycle so post-close backlogs drop.
+	sess.Close()
+	if got := sess.currentLifecycle(); got == lifecycle {
+		t.Fatal("close must retire the lifecycle")
+	}
+	if err := sess.saveAuthIfCurrent(lifecycle); err != nil {
+		t.Fatalf("post-close save must be a silent skip, got %v", err)
 	}
 }

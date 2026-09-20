@@ -79,7 +79,7 @@ func (s *Session) Login(bundle []byte) {
 	//
 	// A new pairing era starts here: anything still running from the
 	// previous login (pairing, syncs, queued events) stops applying.
-	generation := s.bumpGeneration()
+	lifecycle := s.bumpLifecycle()
 	s.mu.Lock()
 	if s.pairCancel != nil {
 		s.pairCancel()
@@ -123,12 +123,12 @@ func (s *Session) Login(bundle []byte) {
 	// on the phone). Display it; it carries no secret.
 	s.fire(Event{Type: "pairing", Account: s.account,
 		Prompt: "Tap " + emoji + " in Google Messages on the phone to confirm linking"})
-	go s.finishPairing(ps, pairCtx, client, auth, generation)
+	go s.finishPairing(ps, pairCtx, client, auth, lifecycle)
 }
 
-func (s *Session) finishPairing(ps *libgm.PairingSession, ctx context.Context, client *libgm.Client, auth *libgm.AuthData, generation uint64) {
+func (s *Session) finishPairing(ps *libgm.PairingSession, ctx context.Context, client *libgm.Client, auth *libgm.AuthData, lifecycle uint64) {
 	s.mu.Lock()
-	stale := s.generation != generation || s.client != client || s.auth != auth || s.ps != ps
+	stale := s.lifecycle != lifecycle || s.client != client || s.auth != auth || s.ps != ps
 	s.mu.Unlock()
 	if stale {
 		// A newer login replaced this pairing while it waited on
@@ -140,7 +140,7 @@ func (s *Session) finishPairing(ps *libgm.PairingSession, ctx context.Context, c
 	// Reject a stale completion: a newer login replaced the client,
 	// auth, or pairing while this one was waiting on the phone.
 	// Touching the new session (disconnect, save) would corrupt it.
-	if s.generation != generation || s.client != client || s.auth != auth || s.ps != ps {
+	if s.lifecycle != lifecycle || s.client != client || s.auth != auth || s.ps != ps {
 		s.mu.Unlock()
 		return
 	}
@@ -161,7 +161,7 @@ func (s *Session) finishPairing(ps *libgm.PairingSession, ctx context.Context, c
 	// polls for one identity get the session invalidated server-side
 	// (observed as an instant GaiaLoggedOut right after auth).
 	client.Disconnect()
-	if err := s.saveAuthIfCurrent(generation); err != nil {
+	if err := s.saveAuthIfCurrent(lifecycle); err != nil {
 		s.fire(Event{Type: "error", Account: s.account, Message: "storing session failed"})
 		return
 	}
@@ -761,9 +761,9 @@ func (s *Session) teardown() {
 	s.auth = nil
 	s.connected = false
 	s.authenticated = false
-	s.generation++
-	if s.generation == 0 {
-		s.generation = 1
+	s.lifecycle++
+	if s.lifecycle == 0 {
+		s.lifecycle = 1
 	}
 	s.mu.Unlock()
 }
@@ -782,6 +782,13 @@ func (s *Session) Close() {
 		s.connectCancel = nil
 	}
 	client := s.client
+	// Retire the lifecycle so queued events and in-flight saves from
+	// before the close stop applying, even if the event loop drains
+	// a stale backlog first.
+	s.lifecycle++
+	if s.lifecycle == 0 {
+		s.lifecycle = 1
+	}
 	s.mu.Unlock()
 	if client != nil {
 		client.Disconnect()
