@@ -117,10 +117,20 @@ func (s *Store) WriteAuth(account string, raw []byte) error {
 		tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
 }
 
 // LoadAuth reads one account's session. A missing file is not an error.
@@ -151,7 +161,16 @@ func (s *Store) DeleteAuth(account string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return nil
+	return syncDir(filepath.Dir(path))
+}
+
+func syncDir(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 
 // Accounts lists accounts with persisted sessions.
