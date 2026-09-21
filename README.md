@@ -16,18 +16,20 @@ that they work.
 
 ## Install
 
-Build the adapter with Go:
+Tagged GitHub Releases attach a Linux amd64 tarball. Unpack it and run
+`./install.sh`, then:
+
+```sh
+export HANDOVER_GMESSAGES_HELPER=$HOME/.local/bin/handover-gmessages
+```
+
+Or build from source with Go:
 
 ```sh
 git clone https://github.com/mananlalwani/handover-gmessages.git
 cd handover-gmessages
 go build -o handover-gmessages .
-```
-
-Point Handover at the binary:
-
-```sh
-export HANDOVER_GMESSAGES_HELPER=/path/to/handover-gmessages
+export HANDOVER_GMESSAGES_HELPER=$PWD/handover-gmessages
 ```
 
 Handover starts and supervises the adapter. You do not need to pass account
