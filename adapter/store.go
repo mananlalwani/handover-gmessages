@@ -66,7 +66,7 @@ func NewStore() (*Store, error) {
 
 func (s *Store) accountFile(account string) (string, bool) {
 	if account == "" || len(account) > 128 || strings.ContainsAny(account, "/\\.") ||
-		strings.Contains(account, "\x00") {
+		strings.ContainsFunc(account, func(r rune) bool { return r < 0x20 }) {
 		return "", false
 	}
 	return filepath.Join(s.dir, account+".session.json"), true

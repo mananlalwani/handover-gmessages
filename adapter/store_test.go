@@ -59,7 +59,7 @@ func TestStoreRoundTripWithStrictPermissions(t *testing.T) {
 
 func TestStoreRejectsUnsafeAccountNames(t *testing.T) {
 	store := &Store{dir: t.TempDir()}
-	for _, name := range []string{"", "../escape", "a/b", "a\\b", ".", "a.b", "x\x00y"} {
+	for _, name := range []string{"", "../escape", "a/b", "a\\b", ".", "a.b", "x\x00y", "a\nb", "a\tb"} {
 		if _, ok := store.accountFile(name); ok {
 			t.Errorf("account %q must be rejected", name)
 		}
