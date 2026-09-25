@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestValidAccountMatchesStorageGate(t *testing.T) {
+func TestValidAccountRejectsUnsafeNames(t *testing.T) {
 	for _, bad := range []string{"", ".", "..", "a/b", `a\b`, "a.b", "a\x00b", "a\nb", strings.Repeat("x", 129)} {
 		if validAccount(bad) {
 			t.Errorf("account %q must be rejected", bad)

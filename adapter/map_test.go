@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
-	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // ignoredStatuses carry no user-visible lifecycle signal: drafts and
@@ -130,7 +129,6 @@ func TestConversationMapping(t *testing.T) {
 	if _, _, err := mapConversation(conv, selfIDs); err == nil {
 		t.Error("empty participants must be rejected")
 	}
-	_ = protoreflect.Name("")
 }
 
 func TestMultiPartyThreadWithoutGroupFlagBecomesGroup(t *testing.T) {
