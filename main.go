@@ -29,7 +29,7 @@ import (
 const adapterName = "handover-gmessages/libgm"
 
 // Version is the adapter release. Keep in sync with the git tag.
-const Version = "0.3.1"
+const Version = "0.3.2"
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version" || os.Args[1] == "version") {

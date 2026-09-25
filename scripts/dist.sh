@@ -4,7 +4,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-VERSION="${HANDOVER_GMESSAGES_VERSION:-0.3.1}"
+VERSION="${HANDOVER_GMESSAGES_VERSION:-0.3.2}"
 HOST="${GOARCH:-$(go env GOARCH)}"
 OS="${GOOS:-$(go env GOOS)}"
 STAGE="handover-gmessages-${VERSION}-${OS}-${HOST}"

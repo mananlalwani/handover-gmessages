@@ -1,7 +1,7 @@
 # Maintainer: Handover contributors
 
 pkgname=handover-gmessages-git
-pkgver=0.3.1.r0.g0000000
+pkgver=0.3.2.r0.g0000000
 pkgrel=1
 pkgdesc='Google Messages helper for Handover (AGPL)'
 arch=('x86_64' 'aarch64')
