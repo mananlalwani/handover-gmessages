@@ -1,18 +1,15 @@
 # Handover Google Messages adapter
 
-This adapter lets Handover use Google Messages from a Linux desktop. It keeps
-the Google account session and phone connection in a separate process. Handover
-receives conversations, messages, statuses, and typing or read-state updates.
-
-The adapter is an add-on for [Handover](https://github.com/mananlalwani/handover),
-not a standalone Google Messages client.
+This adapter is the Google Messages process for Handover. It is not a
+standalone Messages client. Account session and phone relay stay here.
+Handover only gets conversations, messages, statuses, typing, and read
+updates.
 
 ## Status
 
-This project depends on the private companion protocol used by Google Messages
-for Web. Google may change that protocol without notice. The adapter pins its
-upstream library version and reports unsupported operations instead of claiming
-that they work.
+Google may change the Messages for Web companion protocol without notice. The
+adapter pins upstream `mautrix-gmessages` and reports unsupported operations
+instead of pretending they work.
 
 ## Install
 
@@ -32,8 +29,8 @@ go build -o handover-gmessages .
 export HANDOVER_GMESSAGES_HELPER=$PWD/handover-gmessages
 ```
 
-Handover starts and supervises the adapter. You do not need to pass account
-credentials in command-line arguments.
+Handover starts the adapter. Do not put account credentials on the command
+line.
 
 ## Pair an account
 
@@ -68,6 +65,7 @@ helper contract.
 
 ## Links
 
+- [Handover](https://github.com/mananlalwani/handover)
 - [User guide](docs/user-guide.md)
 - [Pairing runbook](docs/pairing-runbook.md)
 - [Handover helper contract](https://github.com/mananlalwani/handover/blob/main/docs/gmessages-sidecar.md)

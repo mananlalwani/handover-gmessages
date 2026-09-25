@@ -69,9 +69,9 @@ handoverctl monitor
 
 ## Recovery and logout
 
-Restart the adapter or `handoverd`; persisted sessions should recover and state
-should resynchronize without a new ceremony. During helper loss, the account
-must be reported offline and return online only after reconnection.
+Restart the adapter or `handoverd`. Persisted sessions recover and state
+resynchronizes without a new ceremony. During helper loss, the account is
+offline and returns online only after reconnection.
 
 When remote revoke is intended:
 

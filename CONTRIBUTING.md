@@ -64,6 +64,6 @@ repository. Update both sides' tests and documentation when a record changes.
 
 ## Commits and pull requests
 
-Keep commits focused. Explain behavior that could not be tested. Do not commit
-generated binaries, credentials, local session state, private test data, or
-live logs.
+Keep commits focused. Subjects use `area: imperative`. Explain what you could
+not test. Do not commit generated binaries, credentials, local session state,
+private test data, or live logs.

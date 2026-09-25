@@ -1,7 +1,7 @@
 # Google Messages adapter user guide
 
-The adapter connects Handover to one Google Messages account. Handover starts
-the adapter and exposes its conversations through `handoverctl`.
+The adapter is Handover's Google Messages process. `handoverd` starts it.
+Conversations show up through `handoverctl`.
 
 ## Before you start
 
@@ -36,9 +36,9 @@ systemctl --user restart handoverd
 
 ## Sign in and pair
 
-Follow the [pairing runbook](pairing-runbook.md). In short, you will copy the
-login request data from Google Messages for Web, pass it to Handover through
-standard input, and confirm the matching emoji on the phone.
+Follow the [pairing runbook](pairing-runbook.md). Copy the login request data
+from Google Messages for Web, pass it to Handover through standard input, and
+confirm the matching emoji on the phone.
 
 The login data is sensitive. Do not save it in a file, shell history, command
 argument, log, or Git commit.
@@ -66,9 +66,9 @@ Wait for an explicit status before treating the send as complete.
 
 ## Restart and recover
 
-Restarting Handover or the adapter should reuse the saved session and
-resynchronize account state. A disconnected account must appear offline until
-the helper reconnects.
+Restarting Handover or the adapter reuses the saved session and
+resynchronizes account state. A disconnected account is offline until the
+helper reconnects.
 
 Sessions persist as 0600 files below
 `${XDG_STATE_HOME:-~/.local/state}/handover/gmessages`. Staged
@@ -91,7 +91,7 @@ Revoke the remote session and remove the local session through Handover:
 handoverctl messages logout gmessages:personal
 ```
 
-Pair again if you want to reconnect the account later.
+Pair again to reconnect the account later.
 
 ## What the adapter supports
 
