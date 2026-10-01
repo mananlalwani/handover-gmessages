@@ -76,6 +76,11 @@ attachments are transient transfer data, swept at adapter startup:
 files older than 7 days go, and the directory is capped at 256 MiB
 oldest-first.
 
+On startup, sessions saved under the old `handover/gmessages-adapter`
+directory migrate to `handover/gmessages`. Existing sessions in the current
+directory take precedence. Legacy session files are removed after the current
+copy is durable so logout cannot restore an old pairing on restart.
+
 If the session cannot recover, repeat the pairing process. Check the service
 logs without sharing their contents publicly:
 
