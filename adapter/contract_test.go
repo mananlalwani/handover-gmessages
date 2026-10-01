@@ -290,3 +290,26 @@ func TestSanitizeText(t *testing.T) {
 		t.Errorf("readable text altered: %q", got)
 	}
 }
+
+func TestAuthoritativeSnapshotsAlwaysCarryGeneration(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		var got []Event
+		sess := &Session{account: "a", emit: func(e Event) { got = append(got, e) }}
+		threads := []Conversation{{LocalID: "c"}}
+		msgs := []Message{{LocalID: "m", Sender: "p"}}
+		if empty {
+			threads = nil
+			msgs = nil
+		}
+		sess.emitConversations(threads, 7, true)
+		sess.emitMessages("c", msgs, true, "", 0)
+		if len(got) != 2 {
+			t.Fatalf("snapshot events = %d", len(got))
+		}
+		for _, evt := range got {
+			if !evt.Full || evt.Generation == 0 {
+				t.Fatalf("snapshot missing generation: type=%s", evt.Type)
+			}
+		}
+	}
+}

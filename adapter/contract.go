@@ -57,10 +57,10 @@ type Event struct {
 	Prompt         string         `json:"prompt,omitempty"`
 	Conversations  []Conversation `json:"conversations,omitempty"`
 	Full           bool           `json:"full,omitempty"`
-	// Generation groups the chunks of one multi-chunk sync. Only the
+	// Generation identifies one authoritative snapshot, including an empty one. Only the
 	// last chunk of a generation carries full=true; the daemon
 	// reconciles once the generation closes instead of per chunk.
-	// Zero means ungrouped (single-chunk or live events).
+	// Zero means an incremental update.
 	Generation   uint64    `json:"generation,omitempty"`
 	Conversation string    `json:"conversation,omitempty"`
 	Messages     []Message `json:"messages,omitempty"`

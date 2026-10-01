@@ -264,8 +264,8 @@ func (s *Session) fullSyncLocked(reason string) (threads []Conversation, results
 				// and starves sends/history.
 				mapped, meta, err := s.mapConversation(conv)
 				if err != nil && len(conv.GetParticipants()) == 0 {
-					// Older relay responses may omit participants from list rows.
-					// Keep the compatibility fallback, but only for those rows.
+					// List rows may omit participants. Fetch the full record
+					// only for those rows.
 					full, fetchErr := s.getConversation(conv.GetConversationID())
 					if fetchErr != nil {
 						s.log.Warn().Str("conversation", conv.GetConversationID()).Msg("skipping thread")
@@ -354,14 +354,17 @@ func (s *Session) nextGeneration() uint64 {
 // share one generation. Only the closing chunk of a complete sync is
 // authoritative, so the daemon reconciles once against the whole list
 // instead of removing and re-adding threads that arrive in later
-// chunks. A list that fits in one chunk keeps the single full event.
+// chunks. Single-chunk and empty snapshots carry the same generation.
 // An incomplete sync (page cap or skipped threads) merges everything:
 // its threads are a subset, and reconciling a subset would delete
 // live state.
 func (s *Session) emitConversations(threads []Conversation, generation uint64, authoritative bool) {
+	if !authoritative {
+		generation = 0
+	}
 	if len(threads) == 0 {
 		s.fire(Event{Type: "conversations", Account: s.account,
-			Conversations: []Conversation{}, Full: authoritative})
+			Conversations: []Conversation{}, Full: authoritative, Generation: generation})
 		return
 	}
 	var chunks [][]Conversation
@@ -380,7 +383,7 @@ func (s *Session) emitConversations(threads []Conversation, generation uint64, a
 		last := i == len(chunks)-1
 		evt := Event{Type: "conversations", Account: s.account,
 			Conversations: chunk, Full: authoritative && last}
-		if authoritative && len(chunks) > 1 {
+		if authoritative {
 			evt.Generation = generation
 		}
 		s.fire(evt)
@@ -391,9 +394,13 @@ func (s *Session) emitConversations(threads []Conversation, generation uint64, a
 // chunk carries the authority flag and the cursor, so multi-chunk
 // windows reconcile once instead of dropping later chunks' messages.
 func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorNext string, fetchID uint64) {
+	var generation uint64
+	if full {
+		generation = s.nextGeneration()
+	}
 	if len(msgs) == 0 {
 		s.fire(Event{Type: "messages", Account: s.account, Conversation: convID,
-			Messages: []Message{}, Full: full, PageComplete: true, FetchID: fetchID})
+			Messages: []Message{}, Full: full, Generation: generation, PageComplete: true, FetchID: fetchID})
 		return
 	}
 	var chunks [][]Message
@@ -408,10 +415,6 @@ func (s *Session) emitMessages(convID string, msgs []Message, full bool, cursorN
 		cur = append(cur, msg)
 	}
 	chunks = append(chunks, cur)
-	var generation uint64
-	if full && len(chunks) > 1 {
-		generation = s.nextGeneration()
-	}
 	for i, chunk := range chunks {
 		last := i == len(chunks)-1
 		evt := Event{Type: "messages", Account: s.account, Conversation: convID,
