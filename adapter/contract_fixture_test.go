@@ -45,6 +45,7 @@ func fixtureEvents() []Event {
 		{Type: "messages", Account: "gmessages:default", Conversation: "t1", Messages: []Message{msg("m2")}, Full: true, Generation: 12, CursorNext: "m1:1700000000000", PageComplete: true},
 		{Type: "message_removed", Account: "gmessages:default", Conversation: "t1", Message: "m0"},
 		{Type: "status", Account: "gmessages:default", Conversation: "t1", Message: "txn-1", Status: "accepted"},
+		{Type: "send_status", RequestID: "r-send-1", Account: "gmessages:default", Conversation: "t1", Message: "txn-1", Status: "accepted"},
 		{Type: "status", Account: "gmessages:default", Conversation: "t1", Message: "m2", Status: "sent"},
 		{Type: "status", Account: "gmessages:default", Conversation: "t1", Message: "txn-2", Status: "failed:transport"},
 		{Type: "typing", Account: "gmessages:default", Conversation: "t1", Participants: []string{"+15550000000"}},

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -84,17 +85,23 @@ func TestTextSendReportsAcceptanceThenTransportFailure(t *testing.T) {
 	if len(infos) != 1 || infos[0].GetMessageContent().GetContent() != "hello" {
 		t.Errorf("outbound message content = %+v", infos)
 	}
-	if len(events) != 3 {
-		t.Fatalf("events = %+v, want acceptance, status, failure", events)
+	if len(events) != 5 {
+		t.Fatalf("events = %+v, want acceptance, correlated and legacy status pairs", events)
 	}
 	if events[0].Type != "command_result" || events[0].RequestID != "request" || !events[0].OK {
 		t.Errorf("command acceptance = %+v", events[0])
 	}
-	if events[1].Type != "status" || events[1].Status != "accepted" || events[1].Conversation != "thread" || events[1].Message == "" {
+	if events[1].Type != "send_status" || events[1].RequestID != "request" || events[1].Status != "accepted" || events[1].Conversation != "thread" || events[1].Message == "" {
 		t.Errorf("accepted status = %+v", events[1])
 	}
-	if events[2].Type != "status" || events[2].Status != "failed:transport" || events[2].Message != events[1].Message {
-		t.Errorf("transport failure = %+v", events[2])
+	if events[2].Type != "status" || events[2].Status != "accepted" {
+		t.Errorf("legacy accepted status = %+v", events[2])
+	}
+	if events[3].Type != "send_status" || events[3].RequestID != "request" || events[3].Status != "failed:transport" || events[3].Message != events[1].Message {
+		t.Errorf("correlated transport failure = %+v", events[3])
+	}
+	if events[4].Type != "status" || events[4].Status != "failed:transport" || events[4].Message != events[1].Message {
+		t.Errorf("legacy transport failure = %+v", events[4])
 	}
 	if len(sess.pending) != 0 {
 		t.Errorf("failed send retained pending correlation: %+v", sess.pending)
@@ -143,6 +150,31 @@ func TestRelayFailureDoesNotInventActionSuccess(t *testing.T) {
 				t.Errorf("events = %+v, want one failure %+v", events, test.want)
 			}
 		})
+	}
+}
+
+func TestRemoteEchoReportsCorrelatedSendStatus(t *testing.T) {
+	var events []Event
+	sess := &Session{
+		account: "personal",
+		pending: map[string]pendingSend{
+			"txn": {requestID: "request", convID: "thread", at: time.Now()},
+		},
+		emit: func(event Event) { events = append(events, event) },
+	}
+	sess.checkPending(&gmproto.Message{
+		TmpID: "txn", MessageID: "message",
+		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_OUTGOING_COMPLETE},
+	}, sess.currentLifecycle())
+	if len(events) != 2 || events[0].Type != "send_status" || events[0].RequestID != "request" ||
+		events[0].Conversation != "thread" || events[0].Message != "message" || events[0].Status != "sent" {
+		t.Fatalf("remote echo status = %+v", events)
+	}
+	if events[1].Type != "status" || events[1].Status != "sent" {
+		t.Fatalf("legacy remote echo status = %+v", events[1])
+	}
+	if len(sess.pending) != 0 {
+		t.Fatalf("completed correlation retained: %+v", sess.pending)
 	}
 }
 

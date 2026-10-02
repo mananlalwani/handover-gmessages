@@ -599,6 +599,8 @@ func (s *Session) checkPending(msg *gmproto.Message, lifecycle uint64) {
 		return
 	}
 	if token, ok := mapStatus(msg.GetMessageStatus().GetStatus()); ok {
+		s.fire(Event{Type: "send_status", RequestID: pending.requestID, Account: s.account,
+			Conversation: pending.convID, Message: msg.GetMessageID(), Status: token})
 		s.fire(Event{Type: "status", Account: s.account,
 			Conversation: pending.convID, Message: msg.GetMessageID(), Status: token})
 	}

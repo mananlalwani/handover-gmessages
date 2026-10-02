@@ -48,7 +48,9 @@ func (s *Session) failure(requestID, msg string) {
 	s.result(requestID, false, msg)
 }
 
-func (s *Session) relayFailure(convID, txn string) {
+func (s *Session) relayFailure(requestID, convID, txn string) {
+	s.fire(Event{Type: "send_status", RequestID: requestID, Account: s.account,
+		Conversation: convID, Message: txn, Status: "failed:transport"})
 	s.fire(Event{Type: "status", Account: s.account, Conversation: convID,
 		Message: txn, Status: "failed:transport"})
 }
@@ -307,6 +309,8 @@ func (s *Session) SendText(requestID, convID, text, replyTo string) {
 	s.pending[txn] = pendingSend{requestID: requestID, convID: convID, at: time.Now()}
 	s.mu.Unlock()
 	s.result(requestID, true, "")
+	s.fire(Event{Type: "send_status", RequestID: requestID, Account: s.account,
+		Conversation: convID, Message: txn, Status: "accepted"})
 	s.fire(Event{Type: "status", Account: s.account,
 		Conversation: convID, Message: txn, Status: "accepted"})
 	ctx, cancel := slowCtx()
@@ -321,7 +325,7 @@ func (s *Session) SendText(requestID, convID, text, replyTo string) {
 		s.mu.Lock()
 		delete(s.pending, txn)
 		s.mu.Unlock()
-		s.relayFailure(convID, txn)
+		s.relayFailure(requestID, convID, txn)
 		return
 	}
 }
@@ -422,6 +426,8 @@ func (s *Session) SendMedia(requestID, convID, path, caption string) {
 	s.pending[txn] = pendingSend{requestID: requestID, convID: convID, at: time.Now()}
 	s.mu.Unlock()
 	s.result(requestID, true, "")
+	s.fire(Event{Type: "send_status", RequestID: requestID, Account: s.account,
+		Conversation: convID, Message: txn, Status: "accepted"})
 	s.fire(Event{Type: "status", Account: s.account,
 		Conversation: convID, Message: txn, Status: "accepted"})
 	if _, err := sendToRelay(ctx, client, req); err != nil {
@@ -431,7 +437,7 @@ func (s *Session) SendMedia(requestID, convID, path, caption string) {
 		s.mu.Lock()
 		delete(s.pending, txn)
 		s.mu.Unlock()
-		s.relayFailure(convID, txn)
+		s.relayFailure(requestID, convID, txn)
 		return
 	}
 }

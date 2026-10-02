@@ -137,6 +137,12 @@ func (e Event) MarshalJSON() ([]byte, error) {
 		out["conversation"] = e.Conversation
 		out["message"] = e.Message
 		out["status"] = e.Status
+	case "send_status":
+		out["request_id"] = e.RequestID
+		out["account"] = e.Account
+		out["conversation"] = e.Conversation
+		str("message", e.Message)
+		out["status"] = e.Status
 	case "typing":
 		out["account"] = e.Account
 		out["conversation"] = e.Conversation

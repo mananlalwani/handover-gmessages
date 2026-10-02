@@ -167,6 +167,10 @@ func TestStatusReadResultShapes(t *testing.T) {
 	if strings.Contains(string(raw), `"error"`) {
 		t.Errorf("absent error must be omitted, got %s", raw)
 	}
+	raw = marshal(t, Event{Type: "send_status", RequestID: "r", Account: "a",
+		Conversation: "c", Message: "m", Status: "accepted"})
+	requireKeys(t, raw, map[string]string{"type": "string", "request_id": "string",
+		"account": "string", "conversation": "string", "message": "string", "status": "string"})
 	raw = marshal(t, Event{Type: "error", Message: "busy"})
 	requireKeys(t, raw, map[string]string{"type": "string", "message": "string"})
 }
