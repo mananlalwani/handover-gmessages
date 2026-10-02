@@ -590,8 +590,6 @@ func (s *Session) checkPending(msg *gmproto.Message, lifecycle uint64) {
 			// attributing a stale request.
 			delete(s.pending, msg.GetTmpID())
 			ok = false
-		} else {
-			delete(s.pending, msg.GetTmpID())
 		}
 	}
 	s.mu.Unlock()
@@ -603,6 +601,14 @@ func (s *Session) checkPending(msg *gmproto.Message, lifecycle uint64) {
 			Conversation: pending.convID, Message: msg.GetMessageID(), Status: token})
 		s.fire(Event{Type: "status", Account: s.account,
 			Conversation: pending.convID, Message: msg.GetMessageID(), Status: token})
+		// Keep correlating after "sent" so later delivered/displayed
+		// receipts can carry the same request id. Terminal outcomes release
+		// the bounded pending entry immediately.
+		if token == "delivered" || token == "displayed" || strings.HasPrefix(token, "failed:") {
+			s.mu.Lock()
+			delete(s.pending, msg.GetTmpID())
+			s.mu.Unlock()
+		}
 	}
 }
 

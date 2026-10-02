@@ -173,8 +173,19 @@ func TestRemoteEchoReportsCorrelatedSendStatus(t *testing.T) {
 	if events[1].Type != "status" || events[1].Status != "sent" {
 		t.Fatalf("legacy remote echo status = %+v", events[1])
 	}
+	if len(sess.pending) != 1 {
+		t.Fatalf("nonterminal sent correlation was removed: %+v", sess.pending)
+	}
+	sess.checkPending(&gmproto.Message{
+		TmpID: "txn", MessageID: "message",
+		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_OUTGOING_DELIVERED},
+	}, sess.currentLifecycle())
+	if len(events) != 4 || events[2].Type != "send_status" || events[2].Status != "delivered" ||
+		events[2].RequestID != "request" {
+		t.Fatalf("terminal delivery status = %+v", events)
+	}
 	if len(sess.pending) != 0 {
-		t.Fatalf("completed correlation retained: %+v", sess.pending)
+		t.Fatalf("terminal correlation retained: %+v", sess.pending)
 	}
 }
 
