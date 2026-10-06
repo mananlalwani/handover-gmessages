@@ -1,15 +1,16 @@
 # Handover Google Messages adapter
 
-This adapter is the Google Messages process for Handover. It is not a
-standalone Messages client. Account session and phone relay stay here.
-Handover only gets conversations, messages, statuses, typing, and read
-updates.
+## Archived
 
-## Status
+This repository is archived and no longer maintained. Handover now includes its
+own independent MIT Google Messages client, replacing this adapter. Use
+[Handover](https://github.com/mananlalwani/handover) and its
+[setup guide](https://github.com/mananlalwani/handover/blob/main/docs/user-guide.md#google-messages).
 
-Google may change the Messages for Web companion protocol without notice. The
-adapter pins upstream `mautrix-gmessages` and reports unsupported operations
-instead of pretending they work.
+The source and instructions below are retained for historical reference. This
+adapter and its upstream dependencies retain their existing licenses.
+
+Google may change the Messages for Web companion protocol without notice.
 
 ## Install
 
@@ -68,5 +69,5 @@ helper contract.
 - [Handover](https://github.com/mananlalwani/handover)
 - [User guide](docs/user-guide.md)
 - [Pairing runbook](docs/pairing-runbook.md)
-- [Handover helper contract](https://github.com/mananlalwani/handover/blob/main/docs/gmessages-sidecar.md)
+- [Handover helper contract](https://github.com/mananlalwani/handover/blob/main/docs/gmessages-helper.md)
 - [License](LICENSE)
